@@ -2,5 +2,23 @@
 name = "immutara"
 version = "0.1.0"
 edition = "2024"
+description = "A Rust-first visual provenance and evidence verification pipeline"
+
+[[bin]]
+name = "immutara"
+path = "src/main.rs"
 
 [dependencies]
+immutara-core = { path = "crates/immutara-core" }
+immutara-pipeline = { path = "crates/immutara-pipeline" }
+immutara-tui = { path = "crates/immutara-tui" }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt", "macros", "sync", "fs", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+[workspace]
+members = ["crates/*"]
+resolver = "2"

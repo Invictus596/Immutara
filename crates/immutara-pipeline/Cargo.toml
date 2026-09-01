@@ -1,0 +1,18 @@
+[package]
+name = "immutara-pipeline"
+version = "0.1.0"
+edition = "2024"
+description = "Pipeline orchestration, processing stages, and provider implementations"
+
+[dependencies]
+immutara-core = { path = "../immutara-core" }
+tokio = { version = "1", features = ["rt", "sync", "fs", "io-util", "process"] }
+tracing = "0.1"
+sha2 = "0.10"
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
