@@ -1,10 +1,10 @@
 # Immutara
 
 Immutara is a **Rust-first visual provenance and evidence verification
-pipeline**. It ingests visual evidence, analyzes it (computer vision
-planned), runs genuine reverse-image search, evaluates it against a
-configurable, versioned verification policy, and records an immutable
-attestation.
+pipeline**. It ingests visual evidence, analyzes it with real computer
+vision (YuNet + SFace face detection/embedding), runs genuine reverse-image
+search, evaluates it against a configurable, versioned verification policy,
+and records an immutable attestation.
 
 Blockchain/ledgers are treated strictly as an **integrity/attestation layer**:
 only content and metadata hashes are committed — never raw images, face
@@ -328,6 +328,10 @@ errors are reported; only search stage contributes nothing to verification.
 
 ### Limitations
 
+- **No real TinEye API key is currently available in this environment.** End-to-end
+  genuine-match validation against evidence imagery has not yet been demonstrated;
+  only the sandbox flow (melon-cat dataset) has been exercised live. Real-mode
+  results shown here would be from a future run with a key, not from this session.
 - Sandbox key only ever returns the "melon cat" sample set, regardless of the
   uploaded image.
 - Rate limits per block depend on your TinEye plan; `429`s are surfaced (and
@@ -355,7 +359,7 @@ The single-view layout shows:
   confidence, plus the face-analysis summary: detector/recognizer models,
   faces detected, selected-face confidence, and embedding dimensionality —
   never a raw embedding), search info (provider, results, source URLs,
-   provider score), verification info (policy version, individual PASS/FAIL checks,
+  provider score), verification info (policy version, individual PASS/FAIL checks,
   timestamp), and attestation info (provider, chain ID, tx hash, block number,
   status);
 - a scrollable **EVENT LOG** where failures are clearly flagged.

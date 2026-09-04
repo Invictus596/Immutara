@@ -1,18 +1,51 @@
-/target/
+# Environment / secrets (never commit).
 .env
 .env.*
 !.env.example
+
+# Credentials and private keys.
+*.pem
+*.key
+*.p12
+*.p8
+*.pk8
+id_rsa
+id_ed25519
+*.pgp
+*.asc
+
+# OS / editor junk.
 .DS_Store
+Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
+.*.swp
+
+# Rust build artifacts.
+/target/
 
 # Downloaded ONNX models are NOT committed; fetch via `models/download_models.py`.
 /models/**/*.onnx
 /models/*.onnx
 
-# Python worker artifacts
+# Local Anvil / Foundry ephemeral data (blockchain milestone).
+.anvil/
+anvil.pid
+*.anvil.db
+broadcast/
+cache/
+out/
+
+# Python worker artifacts.
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
+.conda/
+
+# Local evidence output.
+/evidence/
