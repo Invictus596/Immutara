@@ -5,6 +5,7 @@
 //! runs them for a given piece of evidence, emitting an event for each
 //! transition. It holds no rendering concerns.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -30,6 +31,12 @@ pub struct PipelineInput {
     pub raw_bytes: Vec<u8>,
     /// MIME type of the evidence file.
     pub mime_type: String,
+    /// Size of the evidence file in bytes.
+    pub file_size: u64,
+    /// Optional on-disk path of the evidence file. When present it is recorded
+    /// in `EvidenceMetadata.source_path`, which real providers (e.g. the
+    /// OpenCV worker) use to locate the image.
+    pub source_path: Option<PathBuf>,
     /// The verification policy to apply.
     pub policy: VerificationPolicy,
 }
@@ -76,7 +83,8 @@ impl Pipeline {
         let evidence = match stages::ingest::ingest(IngestInput {
             raw_bytes: input.raw_bytes,
             mime_type: input.mime_type,
-            file_size: 0,
+            file_size: input.file_size,
+            source_path: input.source_path,
         }) {
             Ok(out) => out.evidence,
             Err(e) => {
@@ -92,11 +100,13 @@ impl Pipeline {
 
         self.emit(PipelineEvent::PipelineStarted {
             evidence_id: evidence.id,
+            metadata: evidence.metadata.clone(),
         })
         .await;
         self.emit(PipelineEvent::EvidenceIngested {
             evidence_id: evidence.id,
             content_hash: evidence.content_hash.clone(),
+            metadata: evidence.metadata.clone(),
         })
         .await;
 
@@ -107,12 +117,26 @@ impl Pipeline {
         let search = self.run_search(&evidence).await;
 
         // ---- Verify (sync, deterministic) ----
-        let verification = stages::verify::verify(stages::verify::VerifyInput {
+        self.emit(PipelineEvent::VerificationStarted {
+            evidence_id: evidence.id,
+        })
+        .await;
+        let verification = match stages::verify::verify(stages::verify::VerifyInput {
             evidence: &evidence,
             analysis: analysis.as_ref(),
             search: search.as_ref(),
             policy: &input.policy,
-        })?;
+        }) {
+            Ok(result) => result,
+            Err(e) => {
+                self.emit(PipelineEvent::PipelineFailed {
+                    evidence_id: evidence.id,
+                    error: e.to_string(),
+                })
+                .await;
+                return Err(e);
+            }
+        };
         self.emit(PipelineEvent::VerificationCompleted {
             evidence_id: evidence.id,
             result: verification.clone(),

@@ -4,6 +4,8 @@
 //! a structural skeleton. The stage only computes a content hash from raw
 //! bytes and records an `Ingest` provenance entry.
 
+use std::path::PathBuf;
+
 use chrono::Utc;
 use immutara_core::ImmutaraError;
 use immutara_core::domain::evidence::{Evidence, EvidenceId, EvidenceMetadata, SchemaVersion};
@@ -17,6 +19,8 @@ pub struct IngestInput {
     pub raw_bytes: Vec<u8>,
     pub mime_type: String,
     pub file_size: u64,
+    /// Optional on-disk source path, recorded into `EvidenceMetadata`.
+    pub source_path: Option<PathBuf>,
 }
 
 /// Output of the ingest stage.
@@ -32,7 +36,7 @@ pub fn ingest(input: IngestInput) -> Result<IngestOutput, ImmutaraError> {
     let content_hash = content_hash(&input.raw_bytes);
 
     let metadata = EvidenceMetadata {
-        source_path: None,
+        source_path: input.source_path,
         mime_type: input.mime_type,
         file_size: input.file_size,
         dimensions: None,

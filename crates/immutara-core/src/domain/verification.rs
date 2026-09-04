@@ -13,7 +13,7 @@ use super::evidence::{EvidenceId, SchemaVersion};
 pub struct VerificationPolicy {
     pub version: SchemaVersion,
     pub min_search_matches: usize,
-    pub min_search_similarity: f64,
+    pub min_provider_score: f64,
     pub require_analysis: bool,
     pub min_analysis_confidence: f64,
     pub required_providers: Vec<String>,

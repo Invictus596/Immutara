@@ -20,7 +20,7 @@ fn default_policy() -> VerificationPolicy {
     VerificationPolicy {
         version: SchemaVersion(1),
         min_search_matches: 0,
-        min_search_similarity: 0.0,
+        min_provider_score: 0.0,
         require_analysis: false,
         min_analysis_confidence: 0.0,
         required_providers: vec![],
@@ -42,6 +42,8 @@ async fn mock_pipeline_runs_end_to_end_and_publishes_events() {
         .process(PipelineInput {
             raw_bytes: b"evidence".to_vec(),
             mime_type: "image/png".to_string(),
+            file_size: 8,
+            source_path: None,
             policy: default_policy(),
         })
         .await

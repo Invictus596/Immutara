@@ -5,3 +5,14 @@
 .DS_Store
 .idea/
 .vscode/
+
+# Downloaded ONNX models are NOT committed; fetch via `models/download_models.py`.
+/models/**/*.onnx
+/models/*.onnx
+
+# Python worker artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/

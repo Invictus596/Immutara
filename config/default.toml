@@ -1,8 +1,7 @@
 # Default Immutara configuration.
 #
-# In this skeleton phase only provider identifiers are declared. Provider
-# implementations (mock now; Python CV / EVM / genuine search later) are
-# selected here. No API keys or sensitive data belong in committed config.
+# Provider implementations (mock now; Python CV later) are selected here.
+# No API keys or sensitive data belong in committed config.
 
 [pipeline]
 evidence_dir = "./evidence"
@@ -16,11 +15,37 @@ require_analysis = false
 min_analysis_confidence = 0.0
 # required_providers = []
 
+# Search stage. `provider` selects the implementation:
+#   "mock"   - deterministic, no external dependencies (default dev path)
+#   "tineye" - real reverse-image-search over the public web (TinEye API)
 [search]
 provider = "mock"
 
+# Settings for the "tineye" provider. The API key is read from the
+# TINEYE_API_KEY environment variable (never committed here). When unset and
+# require_real_key = false, the public TinEye sandbox key is used — it returns
+# real HTTP results, but always for the sample "melon cat" image regardless of
+# the uploaded file. For genuine submission validation, set require_real_key = true:
+# [search.tineye]
+# require_real_key = true
+# timeout_seconds = 60
+
+# Analysis stage. `provider` selects the implementation:
+#   "mock"   - deterministic, no external dependencies (default dev path)
+#   "opencv" - real YuNet + SFace face analysis via a Python worker
 [analysis]
 provider = "mock"
+
+# Settings for the "opencv" provider. These defaults (below) are used when the
+# table is omitted; uncomment and adjust to enable real CV analysis.
+# [analysis.opencv]
+# models_dir = "./models"
+# python_package_dir = "./py"
+# python = "python3"
+# worker_module = "immutara_cv.face_worker"
+# detection_threshold = 0.9
+# max_image_dimension = 4096
+# timeout_seconds = 30
 
 [attestation]
 provider = "mock"

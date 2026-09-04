@@ -68,11 +68,11 @@ pub fn verify(input: VerifyInput) -> Result<VerificationResult, ImmutaraError> {
         let similarity_ok = search
             .matches
             .iter()
-            .all(|m| m.similarity_score >= input.policy.min_search_similarity);
+            .all(|m| m.provider_score >= input.policy.min_provider_score);
         checks.push(VerificationCheck {
-            name: "min_search_similarity".to_string(),
+            name: "min_provider_score".to_string(),
             passed: similarity_ok,
-            details: format!("min similarity {}", input.policy.min_search_similarity),
+            details: format!("min provider score {}", input.policy.min_provider_score),
         });
 
         let providers_ok = input
@@ -130,7 +130,7 @@ mod tests {
         VerificationPolicy {
             version: SchemaVersion(1),
             min_search_matches: 1,
-            min_search_similarity: 0.5,
+            min_provider_score: 0.5,
             require_analysis: false,
             min_analysis_confidence: 0.5,
             required_providers: vec![],
@@ -186,7 +186,7 @@ mod tests {
         let search = sample_search(vec![SearchMatch {
             source_url: None,
             source_description: None,
-            similarity_score: 0.9,
+            provider_score: 0.9,
             first_seen: None,
             thumbnail_url: None,
         }]);
@@ -207,7 +207,7 @@ mod tests {
         let search = sample_search(vec![SearchMatch {
             source_url: None,
             source_description: None,
-            similarity_score: 0.1,
+            provider_score: 0.1,
             first_seen: None,
             thumbnail_url: None,
         }]);
@@ -219,12 +219,7 @@ mod tests {
         })
         .unwrap();
         assert!(!result.passed);
-        assert!(
-            result
-                .checks
-                .iter()
-                .any(|c| c.name == "min_search_similarity")
-        );
+        assert!(result.checks.iter().any(|c| c.name == "min_provider_score"));
     }
 
     #[test]
@@ -282,6 +277,7 @@ mod tests {
                 },
             }],
             text_regions: vec![],
+            face_analysis: None,
             metadata_hash: ContentHash("x".into()),
             analyzed_at: Utc::now(),
         };

@@ -9,7 +9,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use immutara_core::ImmutaraError;
-use immutara_core::domain::analysis::{AnalysisResult, BoundingBox, DetectedObject, TextRegion};
+use immutara_core::domain::analysis::{
+    AnalysisResult, BoundingBox, DetectedObject, FaceAnalysis, TextRegion,
+};
 use immutara_core::domain::attestation::{AttestationReceipt, AttestationRecord};
 use immutara_core::domain::evidence::{ContentHash, Evidence};
 use immutara_core::domain::search::{SearchMatch, SearchResult};
@@ -21,6 +23,8 @@ pub struct MockAnalysisProvider {
     pub provider_id: String,
     pub objects: Vec<DetectedObject>,
     pub text_regions: Vec<TextRegion>,
+    /// When set, the mock returns this face-analysis payload in results.
+    pub face_analysis: Option<FaceAnalysis>,
     /// When set, analyzing returns this error.
     pub fail_with: Option<String>,
     pub calls: Arc<Mutex<usize>>,
@@ -41,6 +45,7 @@ impl Default for MockAnalysisProvider {
                 },
             }],
             text_regions: vec![],
+            face_analysis: None,
             fail_with: None,
             calls: Arc::new(Mutex::new(0)),
         }
@@ -63,6 +68,7 @@ impl AnalysisProvider for MockAnalysisProvider {
             model_version: Some("0.1.0".to_string()),
             objects: self.objects.clone(),
             text_regions: self.text_regions.clone(),
+            face_analysis: self.face_analysis.clone(),
             metadata_hash: ContentHash("mock".repeat(64)),
             analyzed_at: Utc::now(),
         })
@@ -89,7 +95,7 @@ impl Default for MockSearchProvider {
             matches: vec![SearchMatch {
                 source_url: Some("https://example.com/mock".to_string()),
                 source_description: None,
-                similarity_score: 0.9,
+                provider_score: 0.9,
                 first_seen: None,
                 thumbnail_url: None,
             }],

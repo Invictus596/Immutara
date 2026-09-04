@@ -7,33 +7,42 @@
 
 use std::time::Duration;
 
-use crate::app::App;
+use crate::app::{App, TuiOutcome};
 use crate::ui::Tui;
 use immutara_core::PipelineEvent;
 use ratatui::crossterm::event::{self, Event as CrosstermEvent, KeyEventKind};
 use tokio::sync::mpsc;
 
-/// Run the TUI event loop until the app signals shutdown.
+/// Run the TUI event loop, returning how the session ended.
 ///
 /// `receiver` is the pipe side owned by the TUI; the pipeline (or caller)
-/// writes into the other end.
+/// writes into the other end. The terminal is always restored before this
+/// returns, including on error.
 pub async fn run(
     app: &mut App,
     receiver: &mut mpsc::Receiver<PipelineEvent>,
-) -> Result<(), std::io::Error> {
+) -> Result<TuiOutcome, std::io::Error> {
     let mut tui = Tui::open()?;
+    let outcome = run_inner(&mut tui, app, receiver).await;
+    tui.close();
+    outcome
+}
 
+async fn run_inner(
+    tui: &mut Tui,
+    app: &mut App,
+    receiver: &mut mpsc::Receiver<PipelineEvent>,
+) -> Result<TuiOutcome, std::io::Error> {
     loop {
         if !app.running {
             break;
         }
 
         // Prefer terminal input, falling back to pipeline events.
-        if event::poll(Duration::from_millis(100))? {
-            if let CrosstermEvent::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    app.on_key(key);
-                }
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => app.on_key(key),
+                _ => {}
             }
         }
 
@@ -43,9 +52,14 @@ pub async fn run(
         }
 
         tui.draw(app)?;
-        std::thread::sleep(Duration::from_millis(50));
+
+        // Yield so the pipeline task can run on a single-threaded runtime.
+        tokio::time::sleep(Duration::from_millis(30)).await;
     }
 
-    tui.close();
-    Ok(())
+    Ok(if app.restart_requested {
+        TuiOutcome::Restart
+    } else {
+        TuiOutcome::Quit
+    })
 }

@@ -6,7 +6,7 @@
 
 use super::analysis::AnalysisResult;
 use super::attestation::AttestationRecord;
-use super::evidence::{ContentHash, EvidenceId};
+use super::evidence::{ContentHash, EvidenceId, EvidenceMetadata};
 use super::search::SearchResult;
 use super::verification::VerificationResult;
 
@@ -16,6 +16,7 @@ pub enum PipelineEvent {
     /// Pipeline run started for a piece of evidence.
     PipelineStarted {
         evidence_id: EvidenceId,
+        metadata: EvidenceMetadata,
     },
     /// Pipeline run completed successfully.
     PipelineCompleted {
@@ -26,6 +27,7 @@ pub enum PipelineEvent {
     EvidenceIngested {
         evidence_id: EvidenceId,
         content_hash: ContentHash,
+        metadata: EvidenceMetadata,
     },
 
     // ---- Analysis stage ----

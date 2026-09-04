@@ -15,7 +15,7 @@ fn default_policy() -> VerificationPolicy {
     VerificationPolicy {
         version: SchemaVersion(1),
         min_search_matches: 0,
-        min_search_similarity: 0.0,
+        min_provider_score: 0.0,
         require_analysis: false,
         min_analysis_confidence: 0.0,
         required_providers: vec![],
@@ -37,6 +37,8 @@ async fn full_pipeline_emits_lifecycle_events_and_succeeds() {
         .process(PipelineInput {
             raw_bytes: b"fake-image-bytes".to_vec(),
             mime_type: "image/jpeg".to_string(),
+            file_size: 16,
+            source_path: None,
             policy: default_policy(),
         })
         .await
@@ -72,6 +74,7 @@ async fn full_pipeline_emits_lifecycle_events_and_succeeds() {
         "analysis_completed",
         "search_started",
         "search_completed",
+        "verification_started",
         "verification_completed",
         "attestation_started",
         "attestation_completed",
@@ -100,6 +103,8 @@ async fn attestation_failure_is_fatal_and_emits_failed_event() {
         .process(PipelineInput {
             raw_bytes: b"bytes".to_vec(),
             mime_type: "image/png".to_string(),
+            file_size: 5,
+            source_path: None,
             policy: default_policy(),
         })
         .await;
@@ -136,6 +141,8 @@ async fn analysis_failure_is_non_fatal() {
         .process(PipelineInput {
             raw_bytes: b"bytes".to_vec(),
             mime_type: "image/jpeg".to_string(),
+            file_size: 5,
+            source_path: None,
             policy: default_policy(),
         })
         .await;
@@ -173,6 +180,8 @@ async fn events_carry_evidence_id_and_content_hash() {
         .process(PipelineInput {
             raw_bytes: b"deterministic-bytes".to_vec(),
             mime_type: "image/jpeg".to_string(),
+            file_size: 19,
+            source_path: None,
             policy: default_policy(),
         })
         .await
@@ -183,6 +192,7 @@ async fn events_carry_evidence_id_and_content_hash() {
         if let PipelineEvent::EvidenceIngested {
             evidence_id,
             content_hash,
+            ..
         } = event
         {
             first_id = Some(evidence_id);

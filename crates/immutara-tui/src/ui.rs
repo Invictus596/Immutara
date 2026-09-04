@@ -27,7 +27,7 @@ impl Tui {
     /// Render one frame of the active screen.
     pub fn draw(&mut self, app: &App) -> io::Result<()> {
         self.terminal
-            .draw(|frame| crate::screens::render(app.screen, app, frame))?;
+            .draw(|frame| crate::render::render(frame, app))?;
         Ok(())
     }
 

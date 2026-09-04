@@ -1,0 +1,8 @@
+# Immutara CV worker dependencies.
+#
+# Install into the Python environment that runs the worker:
+#   python3 -m pip install -r requirements.txt
+#
+# Only OpenCV is strictly required (it bundles NumPy). The worker uses
+# OpenCV's DNN module for CPU inference with the YuNet and SFace models.
+opencv-python>=4.9
