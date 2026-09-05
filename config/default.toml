@@ -49,3 +49,15 @@ provider = "mock"
 
 [attestation]
 provider = "mock"
+
+# Real EVM attestation. `provider = "evm"` selects it. Deploy the
+# AttestationRegistry contract first (./scripts/deploy_contract.sh) and paste
+# its address into contract_address. The private key is ALWAYS read from an
+# environment variable — never commit a key to any file.
+# [attestation.evm]
+# rpc_url = "http://127.0.0.1:8545"
+# chain_id = 31337
+# contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+# private_key_env = "IMMUTARA_EVM_PRIVATE_KEY"
+# timeout_seconds = 60
+# confirmations = 1

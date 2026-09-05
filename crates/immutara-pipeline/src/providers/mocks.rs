@@ -12,11 +12,15 @@ use immutara_core::ImmutaraError;
 use immutara_core::domain::analysis::{
     AnalysisResult, BoundingBox, DetectedObject, FaceAnalysis, TextRegion,
 };
-use immutara_core::domain::attestation::{AttestationReceipt, AttestationRecord};
+use immutara_core::domain::attestation::{
+    AttestationReceipt, AttestationRecord, BlockchainVerification,
+};
 use immutara_core::domain::evidence::{ContentHash, Evidence};
 use immutara_core::domain::search::{SearchMatch, SearchResult};
 use immutara_core::providers::{AnalysisProvider, AttestationProvider, ImageSearchProvider};
 use tokio::sync::Mutex;
+
+use crate::hashing::{derive_attestation_id, record_hash};
 
 /// A mock analysis provider returning configurable object detections.
 pub struct MockAnalysisProvider {
@@ -129,6 +133,11 @@ impl ImageSearchProvider for MockSearchProvider {
 }
 
 /// A mock attestation provider simulating an on-chain submission.
+///
+/// Mirrors the real EVM provider's observable behaviour: the record hash is
+/// derived from the canonical record bytes, the attestation id derives
+/// deterministically from the content hash, and the read-back always matches
+/// (blockchain verification succeeds).
 pub struct MockAttestationProvider {
     pub provider_id: String,
     pub chain_id: String,
@@ -152,7 +161,7 @@ impl Default for MockAttestationProvider {
 impl AttestationProvider for MockAttestationProvider {
     async fn attest(
         &self,
-        _record: &AttestationRecord,
+        record: &AttestationRecord,
     ) -> Result<AttestationReceipt, ImmutaraError> {
         *self.calls.lock().await += 1;
         if let Some(msg) = &self.fail_with {
@@ -161,10 +170,16 @@ impl AttestationProvider for MockAttestationProvider {
                 message: msg.clone(),
             });
         }
+        let record_hash = record_hash(record)?;
+        let attestation_id = derive_attestation_id(&record.content_hash);
         Ok(AttestationReceipt {
             tx_hash: format!("0x{:064}", 0),
             block_number: 1,
             chain_id: self.chain_id.clone(),
+            contract_address: "0x0000000000000000000000000000000000000000".to_string(),
+            attestation_id: format!("0x{attestation_id:x}"),
+            on_chain_record_hash: format!("0x{record_hash:x}"),
+            blockchain_verification: BlockchainVerification::Verified,
         })
     }
 

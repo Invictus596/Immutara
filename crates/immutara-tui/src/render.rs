@@ -271,6 +271,14 @@ fn attestation_lines(app: &App) -> Vec<Line<'static>> {
             if let Some(c) = &a.chain_id {
                 v.push(kv("Chain ID", c));
             }
+            match &a.contract_address {
+                Some(addr) => v.push(kv("Contract", &truncate(addr, 24))),
+                None => v.push(kv("Contract", "n/a")),
+            }
+            match &a.attestation_id {
+                Some(id) => v.push(kv("Attestation ID", &truncate(id, 24))),
+                None => v.push(kv("Attestation ID", "n/a")),
+            }
             match &a.tx_hash {
                 Some(tx) => v.push(kv("Tx hash", &truncate(tx, 24))),
                 None => v.push(kv("Tx hash", "n/a")),
@@ -281,13 +289,18 @@ fn attestation_lines(app: &App) -> Vec<Line<'static>> {
             }
             match a.status {
                 StageStatus::Completed => v.push(Line::from(Span::styled(
-                    "  Status: attested on-chain",
+                    "  Status: VERIFIED",
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
                 ))),
                 StageStatus::Failed => v.push(Line::from(Span::styled(
-                    format!("  Status: failed — {}", a.error.as_deref().unwrap_or("")),
+                    format!(
+                        "  Status: FAILED — {}",
+                        a.error
+                            .as_deref()
+                            .unwrap_or("on-chain re-verification failed")
+                    ),
                     Style::default().fg(Color::Red),
                 ))),
                 _ => v.push(small("waiting for attestation…")),
@@ -455,7 +468,7 @@ mod tests {
     use immutara_core::domain::analysis::{
         AnalysisResult, BoundingBox, DetectedObject, FaceAnalysis, SelectedFace,
     };
-    use immutara_core::domain::attestation::AttestationRecord;
+    use immutara_core::domain::attestation::{AttestationReceipt, BlockchainVerification};
     use immutara_core::domain::evidence::{
         ContentHash, EvidenceId, EvidenceMetadata, SchemaVersion,
     };
@@ -565,7 +578,7 @@ mod tests {
         app.on_pipeline_event(PipelineEvent::AttestationStarted { evidence_id: id });
         app.on_pipeline_event(PipelineEvent::AttestationCompleted {
             evidence_id: id,
-            record: AttestationRecord {
+            record: immutara_core::domain::attestation::AttestationRecord {
                 schema_version: SchemaVersion(1),
                 pipeline_version: "0.1.0".into(),
                 evidence_id: id,
@@ -575,9 +588,16 @@ mod tests {
                 verification_policy_version: SchemaVersion(1),
                 provider_id: "mock-attestation".into(),
                 chain_id: "0x1".into(),
-                tx_hash: Some("0xabc".into()),
-                block_number: Some(42),
                 attested_at: Utc::now(),
+            },
+            receipt: AttestationReceipt {
+                tx_hash: "0xabc".into(),
+                block_number: 42,
+                chain_id: "0x1".into(),
+                contract_address: "0x5FbDB2315678afecb367f032d93F642f64180aa3".into(),
+                attestation_id: "0x11".repeat(32),
+                on_chain_record_hash: "0x22".repeat(32),
+                blockchain_verification: BlockchainVerification::Verified,
             },
         });
         app.on_pipeline_event(PipelineEvent::PipelineCompleted { evidence_id: id });
@@ -602,7 +622,7 @@ mod tests {
     #[test]
     fn completed_run_renders_all_sections() {
         let app = build_completed_app();
-        let buf = render_text(&app, 160, 72);
+        let buf = render_text(&app, 160, 110);
 
         assert!(buf.contains("IMMUTARA"), "header title");
         assert!(buf.contains("PIPELINE STAGES"), "stages panel");
@@ -615,6 +635,10 @@ mod tests {
         assert!(buf.contains("image/png"), "mime type rendered");
         // Completed stage glyph present.
         assert!(buf.contains("completed"), "stage status");
+        // Attestation shows the verification verdict, not a generic message.
+        assert!(buf.contains("VERIFIED"), "attestation verdict rendered");
+        assert!(buf.contains("Contract"), "contract address rendered");
+        assert!(buf.contains("Attestation ID"), "anchor id rendered");
     }
 
     #[test]

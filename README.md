@@ -84,12 +84,14 @@ The pipeline publishes a single authoritative `PipelineEvent` stream through a
   Python subprocess, or `mock`)
 - `ImageSearchProvider` — reverse-image search (`tineye` real provider over the
   public web, or `mock`)
-- `AttestationProvider` — ledger/blockchain attestation (single EVM testnet planned)
+- `AttestationProvider` — ledger/blockchain attestation (`evm` real provider,
+  or `mock`)
 
 Mock implementations in `immutara-pipeline/src/providers/mocks.rs`
 exercise the full pipeline deterministically. The real analysis provider lives
 in `immutara-pipeline/src/providers/python_analysis.rs`; the real reverse-image
-search provider lives in `immutara-pipeline/src/providers/tineye.rs`.
+search provider lives in `immutara-pipeline/src/providers/tineye.rs`; the real
+EVM provider lives in `immutara-pipeline/src/providers/evm.rs`.
 
 ### Canonical serialization
 
@@ -127,13 +129,19 @@ across processes and versions.
       TinEye API over the public web, real scores/URLs mapped to `SearchMatch`,
       config-driven provider selection (`mock` vs `tineye`), search failure
       non-fatal
+- [x] **Real EVM attestation** (`evm` provider): minimal `AttestationRegistry`
+      Solidity contract (hash anchors only), deployment via Foundry, real
+      on-chain writes over Alloy, on-chain read-back re-verification with
+      tamper detection, config-driven provider selection (`mock` vs `evm`),
+      and real local Anvil end-to-end integration tests
+- [x] **Deterministic attestation ids** — `attestationId` derived from the
+      evidence content hash so the same evidence maps to the same chain slot
 
 ## Not Implemented Yet (intentionally)
 
 - **Facial recognition / biometric identification of people**
-- **Blockchain / RPC integrations** and **smart contracts**
 - **Image normalization** and **EXIF extraction**
-- **Real multi-chain/ Solana support** — only a single EVM testnet is planned
+- **Real multi-chain / Solana support** — only a single EVM chain is supported
 - **GPU acceleration / CUDA** for the CV models — CPU inference only
 
 Dependencies are added only as the corresponding functionality is implemented.
@@ -145,6 +153,9 @@ cargo build --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets --all-features
 cargo fmt --all
+
+# Solidity contract (see contracts/README.md)
+cd contracts && forge build && forge lint src/ && forge test
 ```
 
 ## Usage
@@ -341,6 +352,96 @@ errors are reported; only search stage contributes nothing to verification.
 - TinEye requires a recognized image format (JPEG/PNG/WebP/GIF/BMP/AVIF/TIFF);
   animated formats are unsupported.
 
+## Real EVM attestation
+
+By default the attestation stage uses the deterministic `mock` provider, selected
+via `[attestation] provider` in `config/default.toml`. To attest on a **real
+EVM chain**, set `provider = "evm"`:
+
+```toml
+[attestation]
+provider = "evm"
+
+[attestation.evm]
+rpc_url = "http://127.0.0.1:8545"
+chain_id = 31337
+contract_address = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+private_key_env = "IMMUTARA_EVM_PRIVATE_KEY"
+timeout_seconds = 60
+confirmations = 1
+```
+
+### The hash anchor
+
+Only hashes are ever written on-chain. Each evidence item yields:
+
+- `recordHash` — SHA-256 of the **canonical** `AttestationRecord` bytes
+  (same canonical serializer used everywhere else in the pipeline);
+- `attestationId` — SHA-256 of `contentHash || "immutara-attestation:v1"`,
+  a **deterministic** `bytes32` slot key derived from the evidence itself.
+
+The `AttestationRegistry` contract (see [`contracts/README.md`](contracts/README.md))
+stores `(recordHash, timestamp, submitter)` under that slot and emits an
+`Attested` event. No media, embeddings, or biometric data touch the chain.
+
+### Verification is a read-back, not a receipt
+
+After the transaction mines, the `evm` provider **re-reads the slot** with
+`getAttestation` and compares the stored hash against the locally recomputed
+record hash. The difference matters:
+
+| Condition                                            | Verdict          |
+| ---------------------------------------------------- | ---------------- |
+| Transaction mined + on-chain hash == local hash      | `VERIFIED`       |
+| Transaction mined + on-chain hash != local hash      | `FAILED` (never shown as verified) |
+| Unset / corrupted slot                               | `FAILED` (re-verification) |
+
+A successful transaction with a mismatched hash is **never** rendered as
+`VERIFIED`: the pipeline records the block factually (tx hash, block number,
+contract, anchor id) but fails the attestation stage.
+
+### Running it (local Anvil)
+
+```bash
+# 1. Terminal A — start a local node
+anvil
+
+# 2. Build + deploy the contract (dev key is public Anvil account 0)
+IMMUTARA_EVM_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  ./scripts/deploy_contract.sh
+#   → prints "Contract address: 0x…" — paste it into [attestation.evm] contract_address
+
+# 3. Terminal B — run the pipeline against real chain state
+IMMUTARA_EVM_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 \
+  immutara tui -f path/to/evidence.png \
+  -c <(sed 's/provider = "mock"/provider = "evm"/' config/default.toml)
+```
+
+### Testing
+
+- `cargo test -p immutara-pipeline --lib` — unit tests (hashing, config,
+  re-verification logic) without any node.
+- `cargo test -p immutara-pipeline --test evm_integration` — **real** Anvil
+  end-to-end: deploys the contract from its Foundry artifact, attests real
+  evidence, re-reads the slot, and proves tamper detection (mutated record,
+  never-set slot, and deliberately corrupted chain storage all read back as
+  failures). Tests skip gracefully when no node or artifact is present.
+
+### Failure behavior
+
+Attestation failures are **fatal** for the run (unlike analysis/search, which
+are non-fatal): an unreachable RPC, a missing private key, a rejected or
+reverted transaction, or a failed read-back all end the pipeline with the error
+surfaced in the TUI event log.
+
+### Security notes
+
+- The private key comes **exclusively** from an environment variable
+  (`private_key_env`, default `IMMUTARA_EVM_PRIVATE_KEY`); it is never read
+  from config, CLI, or files, and never committed.
+- The `0xac0974…` Anvil address shown above is the standard public test key — it
+  is only ever valid on a throwaway local chain.
+
 ## Terminal UI (`immutara tui`)
 
 `immutara tui` launches the Ratatui interface and runs the pipeline (mock or
@@ -360,8 +461,8 @@ The single-view layout shows:
   faces detected, selected-face confidence, and embedding dimensionality —
   never a raw embedding), search info (provider, results, source URLs,
   provider score), verification info (policy version, individual PASS/FAIL checks,
-  timestamp), and attestation info (provider, chain ID, tx hash, block number,
-  status);
+  timestamp), and attestation info (provider, chain ID, contract address,
+  attestation id, tx hash, block number, and a `VERIFIED` / `FAILED` verdict);
 - a scrollable **EVENT LOG** where failures are clearly flagged.
 
 The TUI derives all of this state directly from `PipelineEvent`s; it contains

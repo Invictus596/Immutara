@@ -12,7 +12,11 @@ use super::evidence::{ContentHash, EvidenceId, SchemaVersion};
 /// The canonical, hashable record of an on-chain attestation.
 ///
 /// This type is serialized deterministically (see `CanonicalSerialize`)
-/// and its bytes are what gets committed on-chain.
+/// and its bytes are what gets committed on-chain. It holds only facts that
+/// exist **before** submission; delivery details (`tx_hash`, `block_number`)
+/// live on the [`AttestationReceipt`], never in the record. That keeps the
+/// record stable so the exact bytes hashed locally can be recomputed and
+/// re-verified against the chain at any later time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttestationRecord {
     pub schema_version: SchemaVersion,
@@ -24,15 +28,31 @@ pub struct AttestationRecord {
     pub verification_policy_version: SchemaVersion,
     pub provider_id: String,
     pub chain_id: String,
-    pub tx_hash: Option<String>,
-    pub block_number: Option<u64>,
     pub attested_at: DateTime<Utc>,
 }
 
+/// Outcome of the on-chain read-back re-verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockchainVerification {
+    /// The hash read back from the chain equals the locally recomputed
+    /// hash of the canonical record.
+    Verified,
+    /// The chain returned something different from the locally recomputed
+    /// hash (or the slot was never set). The anchor must NOT be trusted.
+    Failed,
+}
+
 /// The confirmation returned by an attestation provider after submission.
+///
+/// Carries both the delivery metadata (transaction, block, contract) and the
+/// on-chain read-back used to re-verify the anchor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestationReceipt {
     pub tx_hash: String,
     pub block_number: u64,
     pub chain_id: String,
+    pub contract_address: String,
+    pub attestation_id: String,
+    pub on_chain_record_hash: String,
+    pub blockchain_verification: BlockchainVerification,
 }

@@ -12,6 +12,7 @@ use immutara_core::PipelineEvent;
 use immutara_core::config::Config;
 use immutara_core::domain::evidence::SchemaVersion;
 use immutara_core::domain::verification::VerificationPolicy;
+use immutara_pipeline::providers::EvmAttestationProvider;
 use immutara_pipeline::providers::PyAnalysisProvider;
 use immutara_pipeline::providers::TineyeImageSearchProvider;
 use immutara_pipeline::providers::mocks::{
@@ -97,12 +98,21 @@ fn build_pipeline(tx: mpsc::Sender<PipelineEvent>, config: &Config) -> Result<Pi
             }
         };
 
-    Ok(Pipeline::new(
-        tx,
-        analysis,
-        search,
-        Arc::new(MockAttestationProvider::default()),
-    ))
+    let attestation: Arc<dyn immutara_core::providers::AttestationProvider> =
+        match config.attestation.provider.as_str() {
+            "mock" => Arc::new(MockAttestationProvider::default()),
+            "evm" => Arc::new(
+                EvmAttestationProvider::new(config.attestation.evm.clone())
+                    .map_err(|e| format!("{e}"))?,
+            ),
+            other => {
+                return Err(format!(
+                    "unknown attestation provider `{other}` (expected `mock` or `evm`)"
+                ));
+            }
+        };
+
+    Ok(Pipeline::new(tx, analysis, search, attestation))
 }
 
 /// Read an evidence file into `PipelineInput`.

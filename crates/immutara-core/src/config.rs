@@ -19,7 +19,7 @@ pub struct Config {
     pub verification: VerificationConfig,
     pub search: SearchConfig,
     pub analysis: AnalysisConfig,
-    pub attestation: ProviderConfig,
+    pub attestation: AttestationConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,18 +68,109 @@ impl Default for VerificationPolicyConfig {
     }
 }
 
-/// Identifies which provider implementation a stage should use.
+/// Attestation stage configuration.
+///
+/// `provider` selects the implementation: `"mock"` (deterministic, no
+/// external dependencies) or `"evm"` (real EVM attestation over an RPC node,
+/// e.g. a local Anvil instance).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ProviderConfig {
+pub struct AttestationConfig {
+    /// Provider implementation: `"mock"` or `"evm"`.
     pub provider: String,
+    /// Settings for the `"evm"` provider.
+    pub evm: EvmChainConfig,
 }
 
-impl Default for ProviderConfig {
+impl Default for AttestationConfig {
     fn default() -> Self {
         Self {
             provider: "mock".to_string(),
+            evm: EvmChainConfig::default(),
         }
+    }
+}
+
+/// Settings for the `"evm"` (real EVM) attestation provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvmChainConfig {
+    /// RPC endpoint of the EVM node (e.g. `http://127.0.0.1:8545` for a
+    /// local Anvil instance).
+    pub rpc_url: String,
+    /// Chain id of the target network (e.g. `31337` for Anvil).
+    pub chain_id: u64,
+    /// Deployed `AttestationRegistry` contract address (20-byte hex,
+    /// optionally `0x`-prefixed).
+    pub contract_address: String,
+    /// Name of the environment variable holding the signing private key.
+    /// The key itself is NEVER committed to config files.
+    pub private_key_env: String,
+    /// Timeout (seconds) for waiting on transaction confirmations.
+    pub timeout_seconds: u64,
+    /// Number of block confirmations required before an attestation is
+    /// considered final.
+    pub confirmations: u64,
+}
+
+impl Default for EvmChainConfig {
+    fn default() -> Self {
+        Self {
+            rpc_url: "http://127.0.0.1:8545".to_string(),
+            chain_id: 31337,
+            contract_address: String::new(),
+            private_key_env: "IMMUTARA_EVM_PRIVATE_KEY".to_string(),
+            timeout_seconds: 60,
+            confirmations: 1,
+        }
+    }
+}
+
+impl EvmChainConfig {
+    /// Validate the chain settings without touching the network.
+    ///
+    /// Only shape checks are performed here (no Alloy types in `immutara-core`);
+    /// the EVM provider re-parses the private key and contract address
+    /// authoritatively at construction time.
+    pub fn validate(&self) -> Result<(), ImmutaraError> {
+        if !(self.rpc_url.starts_with("http://") || self.rpc_url.starts_with("https://")) {
+            return Err(ImmutaraError::Config(format!(
+                "attestation.evm.rpc_url must use http:// or https://, got `{}`",
+                self.rpc_url
+            )));
+        }
+        if self.chain_id == 0 {
+            return Err(ImmutaraError::Config(
+                "attestation.evm.chain_id must be a non-zero chain id".to_string(),
+            ));
+        }
+        let addr = self
+            .contract_address
+            .strip_prefix("0x")
+            .unwrap_or(&self.contract_address);
+        let valid_addr = addr.len() == 40 && addr.chars().all(|c| c.is_ascii_hexdigit());
+        if !valid_addr {
+            return Err(ImmutaraError::Config(format!(
+                "attestation.evm.contract_address must be a 20-byte hex address, got `{}`",
+                self.contract_address
+            )));
+        }
+        if self.private_key_env.is_empty() {
+            return Err(ImmutaraError::Config(
+                "attestation.evm.private_key_env must name an environment variable".to_string(),
+            ));
+        }
+        if self.timeout_seconds == 0 {
+            return Err(ImmutaraError::Config(
+                "attestation.evm.timeout_seconds must be positive".to_string(),
+            ));
+        }
+        if self.confirmations == 0 {
+            return Err(ImmutaraError::Config(
+                "attestation.evm.confirmations must be at least 1".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

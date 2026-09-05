@@ -5,7 +5,7 @@
 //! decoupled: both depend only on core, and neither depends on the other.
 
 use super::analysis::AnalysisResult;
-use super::attestation::AttestationRecord;
+use super::attestation::{AttestationReceipt, AttestationRecord};
 use super::evidence::{ContentHash, EvidenceId, EvidenceMetadata};
 use super::search::SearchResult;
 use super::verification::VerificationResult;
@@ -76,6 +76,7 @@ pub enum PipelineEvent {
     AttestationCompleted {
         evidence_id: EvidenceId,
         record: AttestationRecord,
+        receipt: AttestationReceipt,
     },
     AttestationFailed {
         evidence_id: EvidenceId,

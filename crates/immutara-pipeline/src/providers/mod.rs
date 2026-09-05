@@ -9,13 +9,16 @@
 //!   OpenCV worker (YuNet + SFace) over an NDJSON subprocess protocol.
 //! - `tineye`: the real reverse-image-search provider backed by the TinEye
 //!   REST API over the public web.
-//!
-//! EVM attestation remains a stub/mock.
+//! - `evm`: the real EVM attestation provider (Alloy) that submits record
+//!   hashes to `contracts/src/AttestationRegistry.sol` and re-verifies the
+//!   on-chain read-back against the locally recomputed hash.
 
+pub mod evm;
 pub mod mocks;
 pub mod python_analysis;
 pub mod tineye;
 
+pub use evm::{EVM_PROVIDER_ID, EvmAttestationProvider};
 pub use mocks::{MockAnalysisProvider, MockAttestationProvider, MockSearchProvider};
 pub use python_analysis::PyAnalysisProvider;
 pub use tineye::TineyeImageSearchProvider;

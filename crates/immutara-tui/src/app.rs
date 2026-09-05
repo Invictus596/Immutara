@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use immutara_core::PipelineEvent;
-use immutara_core::domain::attestation::AttestationRecord;
+use immutara_core::domain::attestation::{AttestationRecord, BlockchainVerification};
 use immutara_core::domain::evidence::{ContentHash, EvidenceId, EvidenceMetadata};
 use immutara_core::domain::verification::{VerificationCheck, VerificationResult};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
@@ -169,11 +169,18 @@ pub struct VerificationInfo {
 }
 
 /// Attestation summary derived from `AttestationCompleted` / `AttestationFailed`.
+///
+/// `status` reflects the on-chain re-verification result: `Completed` means
+/// the anchor was verified (VERIFIED), `Failed` means the on-chain read-back
+/// did not match the locally recomputed hash (FAILED) or the submission
+/// errored.
 #[derive(Debug, Clone)]
 pub struct AttestationInfo {
     pub record: Option<AttestationRecord>,
     pub provider_id: Option<String>,
     pub chain_id: Option<String>,
+    pub contract_address: Option<String>,
+    pub attestation_id: Option<String>,
     pub tx_hash: Option<String>,
     pub block_number: Option<u64>,
     pub status: StageStatus,
@@ -333,23 +340,49 @@ impl App {
                 self.stage(StageId::Verify).complete();
             }
             PipelineEvent::AttestationStarted { .. } => self.stage(StageId::Attest).start(),
-            PipelineEvent::AttestationCompleted { record, .. } => {
+            PipelineEvent::AttestationCompleted {
+                record, receipt, ..
+            } => {
+                let verified = receipt.blockchain_verification == BlockchainVerification::Verified;
+                let status = if verified {
+                    StageStatus::Completed
+                } else {
+                    StageStatus::Failed
+                };
+                let error = if verified {
+                    None
+                } else {
+                    Some(format!(
+                        "on-chain re-verification FAILED for anchor {}",
+                        receipt.attestation_id
+                    ))
+                };
                 self.attestation = Some(AttestationInfo {
                     record: Some(record.clone()),
                     provider_id: Some(record.provider_id.clone()),
-                    chain_id: Some(record.chain_id.clone()),
-                    tx_hash: record.tx_hash.clone(),
-                    block_number: record.block_number,
-                    status: StageStatus::Completed,
-                    error: None,
+                    chain_id: Some(receipt.chain_id.clone()),
+                    contract_address: Some(receipt.contract_address.clone()),
+                    attestation_id: Some(receipt.attestation_id.clone()),
+                    tx_hash: Some(receipt.tx_hash.clone()),
+                    block_number: Some(receipt.block_number),
+                    status,
+                    error: error.clone(),
                 });
-                self.stage(StageId::Attest).complete();
+                if verified {
+                    self.stage(StageId::Attest).complete();
+                } else {
+                    self.stage(StageId::Attest)
+                        .fail(error.clone().unwrap_or_default());
+                    self.overall_error = error;
+                }
             }
             PipelineEvent::AttestationFailed { error, .. } => {
                 let info = self.attestation.get_or_insert(AttestationInfo {
                     record: None,
                     provider_id: None,
                     chain_id: None,
+                    contract_address: None,
+                    attestation_id: None,
                     tx_hash: None,
                     block_number: None,
                     status: StageStatus::Failed,
@@ -461,6 +494,11 @@ where
     })
 }
 
+/// Shorten a hex id for compact log lines.
+fn short_hex(s: &str) -> &str {
+    if s.len() > 12 { &s[..12] } else { s }
+}
+
 /// Produce a single-line description and severity for the log.
 fn describe(event: &PipelineEvent) -> (String, bool) {
     match event {
@@ -493,13 +531,26 @@ fn describe(event: &PipelineEvent) -> (String, bool) {
             !result.passed,
         ),
         PipelineEvent::AttestationStarted { .. } => ("attestation started".into(), false),
-        PipelineEvent::AttestationCompleted { record, .. } => (
-            format!(
-                "attestation complete (tx {})",
-                record.tx_hash.as_deref().unwrap_or("pending")
-            ),
-            false,
-        ),
+        PipelineEvent::AttestationCompleted { receipt, .. } => {
+            let verified = receipt.blockchain_verification == BlockchainVerification::Verified;
+            if verified {
+                (
+                    format!(
+                        "attestation verified on-chain (tx {})",
+                        short_hex(&receipt.tx_hash)
+                    ),
+                    false,
+                )
+            } else {
+                (
+                    format!(
+                        "attestation re-verification FAILED (tx {})",
+                        short_hex(&receipt.tx_hash)
+                    ),
+                    true,
+                )
+            }
+        }
         PipelineEvent::AttestationFailed { error, .. } => {
             (format!("attestation failed: {error}"), true)
         }
@@ -510,7 +561,7 @@ fn describe(event: &PipelineEvent) -> (String, bool) {
 mod tests {
     use super::*;
     use immutara_core::domain::analysis::{AnalysisResult, BoundingBox, DetectedObject};
-    use immutara_core::domain::attestation::AttestationRecord;
+    use immutara_core::domain::attestation::AttestationReceipt;
     use immutara_core::domain::evidence::{
         ContentHash, EvidenceId, EvidenceMetadata, SchemaVersion,
     };
@@ -629,6 +680,37 @@ mod tests {
                 error: err.into(),
             };
         }
+        let record = AttestationRecord {
+            schema_version: SchemaVersion(1),
+            pipeline_version: "0.1.0".into(),
+            evidence_id: id,
+            content_hash: ContentHash("a".repeat(64)),
+            metadata_hash: ContentHash("m".repeat(64)),
+            verification_result_hash: ContentHash("v".repeat(64)),
+            verification_policy_version: SchemaVersion(1),
+            provider_id: "mock-attestation".into(),
+            chain_id: "0x1".into(),
+            attested_at: Utc::now(),
+        };
+        let receipt = AttestationReceipt {
+            tx_hash: "0xabc".into(),
+            block_number: 42,
+            chain_id: "0x1".into(),
+            contract_address: "0x0000000000000000000000000000000000000000".into(),
+            attestation_id: "0x11".repeat(32),
+            on_chain_record_hash: "0x22".repeat(32),
+            blockchain_verification: BlockchainVerification::Verified,
+        };
+        PipelineEvent::AttestationCompleted {
+            evidence_id: id,
+            record,
+            receipt,
+        }
+    }
+
+    /// Attestation that submitted successfully but FAILED re-verification
+    /// (on-chain hash differs from the local record hash).
+    fn attestation_reverify_failed(id: EvidenceId) -> PipelineEvent {
         PipelineEvent::AttestationCompleted {
             evidence_id: id,
             record: AttestationRecord {
@@ -641,9 +723,16 @@ mod tests {
                 verification_policy_version: SchemaVersion(1),
                 provider_id: "mock-attestation".into(),
                 chain_id: "0x1".into(),
-                tx_hash: Some("0xabc".into()),
-                block_number: Some(42),
                 attested_at: Utc::now(),
+            },
+            receipt: AttestationReceipt {
+                tx_hash: "0xabc".into(),
+                block_number: 42,
+                chain_id: "0x1".into(),
+                contract_address: "0x0000000000000000000000000000000000000000".into(),
+                attestation_id: "0xdead".repeat(16),
+                on_chain_record_hash: "0x00".repeat(32),
+                blockchain_verification: BlockchainVerification::Failed,
             },
         }
     }
@@ -743,6 +832,26 @@ mod tests {
         // The failed stage stays failed while the rest completed.
         assert_eq!(app.stages[1].1.status, StageStatus::Failed);
         assert_eq!(app.stages[3].1.status, StageStatus::Completed);
+    }
+
+    #[test]
+    fn re_verification_mismatch_is_failed_and_fatal() {
+        let id = eid();
+        let mut app = App::default();
+        app.on_pipeline_event(started(id));
+        app.on_pipeline_event(ingested(id));
+        app.on_pipeline_event(PipelineEvent::AttestationStarted { evidence_id: id });
+        app.on_pipeline_event(attestation_reverify_failed(id));
+
+        // A successful transaction with a mismatched hash must NOT be shown
+        // as verified: the attestation stage fails and the run is fatal.
+        let info = app.attestation.as_ref().unwrap();
+        assert_eq!(info.status, StageStatus::Failed);
+        assert_eq!(info.tx_hash.as_deref(), Some("0xabc"));
+        assert_eq!(info.block_number, Some(42));
+        assert_eq!(app.stages[4].1.status, StageStatus::Failed);
+        assert!(app.overall_error.is_some());
+        assert!(!app.finished);
     }
 
     #[test]

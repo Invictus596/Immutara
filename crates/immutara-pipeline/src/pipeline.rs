@@ -13,7 +13,7 @@ use immutara_core::CanonicalSerialize;
 use immutara_core::CanonicalSerializeForHashing;
 use immutara_core::ImmutaraError;
 use immutara_core::domain::analysis::AnalysisResult;
-use immutara_core::domain::attestation::AttestationRecord;
+use immutara_core::domain::attestation::{AttestationRecord, BlockchainVerification};
 use immutara_core::domain::evidence::{Evidence, EvidenceId, SchemaVersion};
 use immutara_core::domain::search::SearchResult;
 use immutara_core::domain::verification::{VerificationPolicy, VerificationResult};
@@ -213,7 +213,7 @@ impl Pipeline {
         evidence: &Evidence,
         verification: &VerificationResult,
         policy: &VerificationPolicy,
-    ) -> Result<AttestationRecord, ImmutaraError> {
+    ) -> Result<(), ImmutaraError> {
         self.emit(PipelineEvent::AttestationStarted {
             evidence_id: evidence.id,
         })
@@ -232,8 +232,6 @@ impl Pipeline {
             verification_policy_version: policy.version,
             provider_id: self.attestation.provider_id().to_string(),
             chain_id: self.attestation.chain_id().to_string(),
-            tx_hash: None,
-            block_number: None,
             attested_at: Utc::now(),
         };
 
@@ -244,17 +242,29 @@ impl Pipeline {
 
         match self.attestation.attest(&record).await {
             Ok(receipt) => {
-                let final_record = AttestationRecord {
-                    tx_hash: Some(receipt.tx_hash),
-                    block_number: Some(receipt.block_number),
-                    ..record
-                };
+                // AttestationCompleted always carries the receipt so the
+                // consumer has the full delivery + verification picture. When
+                // the on-chain read-back disagrees with the local hash the
+                // receipt reports `Failed` and the run is still fatal — a
+                // successful transaction must never be presented as verified.
                 self.emit(PipelineEvent::AttestationCompleted {
                     evidence_id: evidence.id,
-                    record: final_record.clone(),
+                    record: record.clone(),
+                    receipt: receipt.clone(),
                 })
                 .await;
-                Ok(final_record)
+                if receipt.blockchain_verification == BlockchainVerification::Failed {
+                    return Err(ImmutaraError::Provider {
+                        provider: self.attestation.provider_id().to_string(),
+                        message: format!(
+                            "on-chain re-verification FAILED for anchor {}: \
+                             the hash stored on-chain does not match the locally \
+                             recomputed record hash (evidence {})",
+                            receipt.attestation_id, evidence.id
+                        ),
+                    });
+                }
+                Ok(())
             }
             Err(e) => {
                 self.emit(PipelineEvent::AttestationFailed {
