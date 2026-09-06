@@ -53,6 +53,11 @@ pub struct VerificationPolicyConfig {
     pub require_analysis: bool,
     pub min_analysis_confidence: f64,
     pub required_providers: Vec<String>,
+    /// Require a media-verified social-media match in search results
+    /// (`SearchMatchState::SocialMatchVerified`). Off by default so that
+    /// existing configurations keep their semantics.
+    #[serde(default)]
+    pub social_match_verified: bool,
 }
 
 impl Default for VerificationPolicyConfig {
@@ -64,6 +69,7 @@ impl Default for VerificationPolicyConfig {
             require_analysis: false,
             min_analysis_confidence: 0.0,
             required_providers: Vec::new(),
+            social_match_verified: false,
         }
     }
 }
@@ -178,12 +184,14 @@ impl EvmChainConfig {
 ///
 /// `provider` selects the implementation: `"mock"` (deterministic, no
 /// external dependencies) or `"tineye"` (real reverse-image-search over the
-/// public web via the TinEye API).
+/// public web via the TinEye API), or `"serpapi_lens"` (real reverse-image
+/// search over Google Lens via the SerpApi API).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SearchConfig {
     pub provider: String,
     pub tineye: TineyeSearchConfig,
+    pub serpapi_lens: SerpApiLensConfig,
 }
 
 impl Default for SearchConfig {
@@ -191,6 +199,7 @@ impl Default for SearchConfig {
         Self {
             provider: "mock".to_string(),
             tineye: TineyeSearchConfig::default(),
+            serpapi_lens: SerpApiLensConfig::default(),
         }
     }
 }
@@ -252,6 +261,63 @@ impl TineyeSearchConfig {
         // Sandbox fallback: always returns results for the "melon cat" sample
         // image, regardless of the uploaded image.
         Ok("6mm60lsCNIBqFwOWjJqA80QZHh9BMwc-ber4u=t^".to_string())
+    }
+}
+
+/// Settings for the `"serpapi_lens"` reverse-image-search provider.
+///
+/// Backed by the SerpApi Google Lens API over the public web. The API key is
+/// read from the `SERPAPI_API_KEY` environment variable at run time — never
+/// committed to config files. There is no public sandbox key for this
+/// provider, so [`SerpApiLensConfig::resolve_api_key`] always requires a
+/// real key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SerpApiLensConfig {
+    /// Base URL of the SerpApi Google Lens endpoint.
+    ///
+    /// Intended for testing against a mock server; production uses the
+    /// default `https://serpapi.com`.
+    pub api_url: String,
+    /// SerpApi API key. Committed config must never hold a real key; resolve
+    /// it from the `SERPAPI_API_KEY` environment variable at run time via
+    /// [`SerpApiLensConfig::resolve_api_key`].
+    pub api_key: String,
+    /// Timeout (seconds) for a single search request.
+    pub timeout_seconds: u64,
+    /// Hard cap (bytes) on the image uploaded to the Lens API. The provider
+    /// downscales re-encoded crops to stay under this limit.
+    pub max_upload_bytes: usize,
+}
+
+impl Default for SerpApiLensConfig {
+    fn default() -> Self {
+        Self {
+            api_url: "https://serpapi.com".to_string(),
+            api_key: String::new(),
+            timeout_seconds: 60,
+            max_upload_bytes: 500_000,
+        }
+    }
+}
+
+impl SerpApiLensConfig {
+    /// Resolve the effective API key from the `SERPAPI_API_KEY` environment
+    /// variable (or an explicitly configured `api_key`).
+    pub fn resolve_api_key(&self) -> Result<String, ImmutaraError> {
+        if !self.api_key.is_empty() {
+            return Ok(self.api_key.clone());
+        }
+        if let Ok(key) = std::env::var("SERPAPI_API_KEY") {
+            return Ok(key);
+        }
+        Err(ImmutaraError::Config(
+            "SERPAPI_API_KEY environment variable not set; \
+             SerpApi does not provide a public sandbox key, so a real key is \
+             always required. Set SERPAPI_API_KEY to enable the serpapi_lens \
+             search provider."
+                .to_string(),
+        ))
     }
 }
 

@@ -5,7 +5,9 @@
 //! stream. Business logic lives here; the TUI contains only presentation.
 
 pub mod event;
+pub mod face_crop;
 pub mod hashing;
+pub mod media_validation;
 pub mod pipeline;
 pub mod provenance;
 pub mod providers;

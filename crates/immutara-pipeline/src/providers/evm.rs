@@ -281,6 +281,7 @@ mod tests {
             content_hash: ContentHash("a".repeat(64)),
             metadata_hash: ContentHash("b".repeat(64)),
             verification_result_hash: ContentHash("c".repeat(64)),
+            search_result_hash: ContentHash("d".repeat(64)),
             verification_policy_version: SchemaVersion(1),
             provider_id: "test".to_string(),
             chain_id: "31337".to_string(),

@@ -203,19 +203,67 @@ fn search_lines(app: &App) -> Vec<Line<'static>> {
         Some(s) => {
             let mut v = vec![
                 kv("Provider", &s.provider_id),
-                kv("Results", &s.matches.len().to_string()),
+                kv("Input", &s.search_input),
+                kv(
+                    "Results",
+                    &format!(
+                        "{} ({} exact, {} visual)",
+                        s.matches.len(),
+                        s.exact_count,
+                        s.visual_count
+                    ),
+                ),
+                kv("Social", &s.social_state),
             ];
+            if let Some((si, m)) = s
+                .selected_index
+                .and_then(|si| s.matches.get(si).map(|m| (si, m)))
+            {
+                let url = m.source_url.as_deref().unwrap_or("(no url)");
+                let domain = m.source_domain.as_deref().unwrap_or("unknown");
+                let rank = m.position.unwrap_or((si + 1) as u32);
+                let kind = if m.match_kind == "exact" {
+                    "EXACT"
+                } else {
+                    "VISUAL"
+                };
+                v.push(kv(
+                    "Selected result",
+                    &format!("[{kind}] #{rank} {}  ({domain})", truncate(url, 40)),
+                ));
+                if let Some(label) = m.media_match.as_deref() {
+                    v.push(kv("Media validation", label));
+                }
+            }
             if s.matches.is_empty() {
                 v.push(small("no search matches"));
             }
-            for m in s.matches.iter().take(4) {
+            for (idx, m) in s.matches.iter().take(4).enumerate() {
                 let url = m.source_url.as_deref().unwrap_or("(no url)");
+                let domain = m.source_domain.as_deref().unwrap_or("unknown");
+                let rank = m.position.unwrap_or((idx + 1) as u32);
                 let score = if m.similarity.is_finite() {
                     format!("{:.0}% match", m.similarity * 100.0)
                 } else {
                     "match (score n/a)".to_string()
                 };
-                v.push(indented(format!("· {}  ({score})", truncate(url, 40))));
+                let kind = if m.match_kind == "exact" {
+                    "exact"
+                } else {
+                    "visual"
+                };
+                let marker = if Some(idx) == s.selected_index {
+                    "*"
+                } else {
+                    "·"
+                };
+                v.push(indented(format!(
+                    "  {marker} [{kind}] #{rank} {}  ({domain})  {score}",
+                    truncate(url, 36)
+                )));
+                if let Some(label) = m.media_match.as_deref() {
+                    v.push(media_note(label));
+                }
             }
             if s.matches.len() > 4 {
                 v.push(small(format!("… and {} more", s.matches.len() - 4)));
@@ -278,6 +326,12 @@ fn attestation_lines(app: &App) -> Vec<Line<'static>> {
             match &a.attestation_id {
                 Some(id) => v.push(kv("Attestation ID", &truncate(id, 24))),
                 None => v.push(kv("Attestation ID", "n/a")),
+            }
+            if let Some(rec) = &a.record {
+                v.push(kv(
+                    "Search fingerprint",
+                    &truncate(&rec.search_result_hash.0, 24),
+                ));
             }
             match &a.tx_hash {
                 Some(tx) => v.push(kv("Tx hash", &truncate(tx, 24))),
@@ -426,6 +480,14 @@ fn small(text: impl Into<String>) -> Line<'static> {
     ))
 }
 
+/// Dimmed note line for a per-match media-validation summary.
+fn media_note(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("      media: {label}"),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
 fn stage_elapsed(stage: &Stage) -> Option<Duration> {
     match (stage.started_at, stage.finished_at) {
         (Some(s), Some(f)) => Some(f.duration_since(s)),
@@ -550,14 +612,35 @@ mod tests {
             result: SearchResult {
                 evidence_id: id,
                 provider_id: "mock-search".into(),
-                matches: vec![SearchMatch {
-                    source_url: Some("https://example.com/photo".into()),
-                    source_description: None,
-                    provider_score: 0.85,
-                    first_seen: None,
-                    thumbnail_url: None,
-                }],
+                search_input: immutara_core::domain::search::SearchInputKind::FaceCrop,
+                matches: vec![
+                    SearchMatch {
+                        match_kind: immutara_core::domain::search::SearchMatchKind::Exact,
+                        source_url: Some("https://example.net/photo".into()),
+                        source_domain: Some("example.net".into()),
+                        source_title: None,
+                        source_description: Some("example".into()),
+                        provider_score: f64::NAN,
+                        position: Some(1),
+                        first_seen: None,
+                        thumbnail_url: None,
+                        media_match: None,
+                    },
+                    SearchMatch {
+                        match_kind: immutara_core::domain::search::SearchMatchKind::Visual,
+                        source_url: Some("https://example.com/photo".into()),
+                        source_domain: Some("example.com".into()),
+                        source_title: None,
+                        source_description: None,
+                        provider_score: 0.85,
+                        position: Some(2),
+                        first_seen: None,
+                        thumbnail_url: None,
+                        media_match: None,
+                    },
+                ],
                 searched_at: Utc::now(),
+                social_state: immutara_core::domain::search::SearchMatchState::WebMatch,
             },
         });
         app.on_pipeline_event(PipelineEvent::VerificationStarted { evidence_id: id });
@@ -585,6 +668,7 @@ mod tests {
                 content_hash: ContentHash("c".repeat(64)),
                 metadata_hash: ContentHash("m".repeat(64)),
                 verification_result_hash: ContentHash("v".repeat(64)),
+                search_result_hash: ContentHash("s".repeat(64)),
                 verification_policy_version: SchemaVersion(1),
                 provider_id: "mock-attestation".into(),
                 chain_id: "0x1".into(),

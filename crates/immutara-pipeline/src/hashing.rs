@@ -6,9 +6,11 @@
 
 use alloy::primitives::B256;
 use immutara_core::CanonicalSerialize;
+use immutara_core::CanonicalSerializeForHashing;
 use immutara_core::ImmutaraError;
 use immutara_core::domain::attestation::AttestationRecord;
 use immutara_core::domain::evidence::ContentHash;
+use immutara_core::domain::search::SearchMatch;
 use sha2::{Digest, Sha256};
 
 /// Stable domain-separation context for attestation ids.
@@ -67,10 +69,23 @@ pub fn derive_attestation_id(content_hash: &ContentHash) -> B256 {
     B256::from(digest)
 }
 
+/// Hash of the most-relevant discovered search result.
+///
+/// `search_result_hash = SHA-256(canonical_bytes(SearchMatch))` of the
+/// selected match (the top-ranked URL the search provider actually returned).
+/// This binds the concrete discovered source URL into the attestation record
+/// so the on-chain anchor commits to the runtime discovery, not just to the
+/// input image and policy verdict. Deterministic: the same selected result
+/// always hashes to the same value.
+pub fn search_result_hash(selected: Option<&SearchMatch>) -> Result<ContentHash, ImmutaraError> {
+    hash_canonical(&CanonicalSerializeForHashing(&selected))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use immutara_core::domain::evidence::ContentHash;
+    use immutara_core::domain::search::SearchMatchKind;
 
     #[test]
     fn sha256_matches_known_vector() {
@@ -110,5 +125,59 @@ mod tests {
             serde_json::json!({"a":2,"b":1}),
         );
         assert_eq!(hash_canonical(&a).unwrap(), hash_canonical(&b).unwrap());
+    }
+
+    #[test]
+    fn search_result_hash_is_deterministic() {
+        use immutara_core::domain::search::SearchMatch;
+        let m = || SearchMatch {
+            match_kind: SearchMatchKind::Exact,
+            source_url: Some("https://www.reddit.com/r/x/comments/1".to_string()),
+            source_domain: Some("reddit.com".to_string()),
+            source_title: Some("TIL".to_string()),
+            source_description: None,
+            provider_score: f64::NAN,
+            position: Some(1),
+            first_seen: None,
+            thumbnail_url: None,
+            media_match: None,
+        };
+        assert_eq!(
+            search_result_hash(Some(&m())).unwrap(),
+            search_result_hash(Some(&m())).unwrap()
+        );
+    }
+
+    #[test]
+    fn search_result_hash_distinguishes_results_and_binds_none() {
+        use immutara_core::domain::search::SearchMatch;
+        let a = SearchMatch {
+            match_kind: SearchMatchKind::Exact,
+            source_url: Some("https://www.reddit.com/r/x/comments/1".to_string()),
+            source_domain: Some("reddit.com".to_string()),
+            source_title: None,
+            source_description: None,
+            provider_score: f64::NAN,
+            position: Some(1),
+            first_seen: None,
+            thumbnail_url: None,
+            media_match: None,
+        };
+        let b = SearchMatch {
+            source_url: Some("https://www.instagram.com/p/zzz".to_string()),
+            ..a.clone()
+        };
+        assert_ne!(
+            search_result_hash(Some(&a)).unwrap(),
+            search_result_hash(Some(&b)).unwrap()
+        );
+        assert_eq!(
+            search_result_hash(None).unwrap(),
+            search_result_hash(None).unwrap()
+        );
+        assert_ne!(
+            search_result_hash(Some(&a)).unwrap(),
+            search_result_hash(None).unwrap()
+        );
     }
 }

@@ -25,6 +25,7 @@ fn default_policy() -> VerificationPolicy {
         min_analysis_confidence: 0.0,
         required_providers: vec![],
         max_evidence_age: None,
+        social_match_verified: false,
     }
 }
 

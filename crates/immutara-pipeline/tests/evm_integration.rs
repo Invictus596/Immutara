@@ -52,6 +52,7 @@ fn record(content: &str) -> AttestationRecord {
         content_hash: ContentHash(sha256_hex(content.as_bytes())),
         metadata_hash: ContentHash(sha256_hex(format!("meta:{content}").as_bytes())),
         verification_result_hash: ContentHash(sha256_hex(format!("verify:{content}").as_bytes())),
+        search_result_hash: ContentHash(sha256_hex(format!("search:{content}").as_bytes())),
         verification_policy_version: SchemaVersion(1),
         provider_id: "evm".to_string(),
         chain_id: "31337".to_string(),

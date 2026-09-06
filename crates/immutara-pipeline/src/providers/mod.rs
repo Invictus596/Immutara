@@ -16,9 +16,11 @@
 pub mod evm;
 pub mod mocks;
 pub mod python_analysis;
+pub mod serpapi_lens;
 pub mod tineye;
 
 pub use evm::{EVM_PROVIDER_ID, EvmAttestationProvider};
 pub use mocks::{MockAnalysisProvider, MockAttestationProvider, MockSearchProvider};
 pub use python_analysis::PyAnalysisProvider;
+pub use serpapi_lens::SerpApiLensSearchProvider;
 pub use tineye::TineyeImageSearchProvider;

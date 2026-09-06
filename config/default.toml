@@ -14,10 +14,16 @@ min_provider_score = 0.0
 require_analysis = false
 min_analysis_confidence = 0.0
 # required_providers = []
+# When true, verification only passes when the search stage produced an
+# independently media-verified social match (state SOCIAL_MATCH_VERIFIED).
+# This is the STRICT competition/final-demo policy. Default (false) keeps the
+# generic-web path unchanged.
+social_match_verified = false
 
 # Search stage. `provider` selects the implementation:
-#   "mock"   - deterministic, no external dependencies (default dev path)
-#   "tineye" - real reverse-image-search over the public web (TinEye API)
+#   "mock"        - deterministic, no external dependencies (default dev path)
+#   "tineye"      - real reverse-image-search over the public web (TinEye API)
+#   "serpapi_lens" - real Google Lens image search via SerpApi (face-crop-first)
 [search]
 provider = "mock"
 
@@ -29,6 +35,16 @@ provider = "mock"
 # [search.tineye]
 # require_real_key = true
 # timeout_seconds = 60
+
+# Settings for the "serpapi_lens" provider (real Google Lens search). The API
+# key is read from the SERPAPI_API_KEY environment variable at run time (never
+# committed here); SerpApi provides no public sandbox key, so a real key is
+# always required. The pipeline searches the selected face crop first and
+# falls back to the full image when the crop yields no useful result.
+# [search.serpapi_lens]
+# api_url = "https://serpapi.com"
+# timeout_seconds = 60
+# max_upload_bytes = 500000
 
 # Analysis stage. `provider` selects the implementation:
 #   "mock"   - deterministic, no external dependencies (default dev path)

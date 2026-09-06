@@ -16,6 +16,26 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::scroll::EventLog;
 
+/// Compact human label for media-match evidence.
+pub fn media_match_label(e: &immutara_core::domain::search::MediaMatchEvidence) -> String {
+    let status = if e.passed { "verified" } else { "unverified" };
+    let method = match e.method {
+        Some(immutara_core::domain::search::MediaMatchMethod::ExactHash) => "exact_hash",
+        Some(immutara_core::domain::search::MediaMatchMethod::PerceptualHash) => "perceptual_hash",
+        None => "not_retrievable",
+    };
+    let measurement = match (e.distance, e.threshold) {
+        (Some(d), Some(t)) => format!(" (distance {d} / threshold {t})"),
+        (Some(d), None) => format!(" (distance {d})"),
+        _ => String::new(),
+    };
+    let note = match &e.note {
+        Some(n) => format!(" — {n}"),
+        None => String::new(),
+    };
+    format!("{status} {method}{measurement}{note}")
+}
+
 /// The ordered pipeline funnel shown in the stage panel.
 ///
 /// `Evidence` and `Ingest` are the single ingestion phase; the pipeline
@@ -149,14 +169,32 @@ pub struct FaceInfo {
 /// Search summary derived from `SearchCompleted`.
 #[derive(Debug, Clone)]
 pub struct SearchMatchInfo {
+    /// `exact` (Google Lens exact match) or `visual` (similarity match).
+    pub match_kind: String,
     pub source_url: Option<String>,
+    pub source_domain: Option<String>,
+    pub position: Option<u32>,
     pub similarity: f64,
+    /// Human summary of the media-match evidence, e.g.
+    /// `verified exact_hash (distance 0)` or `unverified — login wall`.
+    pub media_match: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SearchInfo {
     pub provider_id: String,
+    /// What image was actually searched: `FACE CROP` or `FULL IMAGE`.
+    pub search_input: String,
     pub matches: Vec<SearchMatchInfo>,
+    /// Count of `exact` Lens matches.
+    pub exact_count: usize,
+    /// Count of `visual` matches.
+    pub visual_count: usize,
+    /// Index into `matches` of the result selected for attestation
+    /// (first exact match, else first visual); `None` when there is none.
+    pub selected_index: Option<usize>,
+    /// Overall search outcome state, e.g. `SOCIAL_MATCH_VERIFIED`.
+    pub social_state: String,
 }
 
 /// Verification summary derived from `VerificationCompleted`.
@@ -314,14 +352,49 @@ impl App {
             PipelineEvent::SearchCompleted { result, .. } => {
                 self.search = Some(SearchInfo {
                     provider_id: result.provider_id.clone(),
+                    search_input: match result.search_input {
+                        immutara_core::domain::search::SearchInputKind::FaceCrop => {
+                            "FACE CROP".to_string()
+                        }
+                        immutara_core::domain::search::SearchInputKind::FullImage => {
+                            "FULL IMAGE".to_string()
+                        }
+                    },
                     matches: result
                         .matches
                         .iter()
                         .map(|m| SearchMatchInfo {
+                            match_kind: match m.match_kind {
+                                immutara_core::domain::search::SearchMatchKind::Exact => {
+                                    "exact".to_string()
+                                }
+                                immutara_core::domain::search::SearchMatchKind::Visual => {
+                                    "visual".to_string()
+                                }
+                            },
                             source_url: m.source_url.clone(),
+                            source_domain: m.source_domain.clone(),
+                            position: m.position,
                             similarity: m.provider_score,
+                            media_match: m.media_match.as_ref().map(media_match_label),
                         })
                         .collect(),
+                    exact_count: result
+                        .matches
+                        .iter()
+                        .filter(|m| {
+                            m.match_kind == immutara_core::domain::search::SearchMatchKind::Exact
+                        })
+                        .count(),
+                    visual_count: result
+                        .matches
+                        .iter()
+                        .filter(|m| {
+                            m.match_kind == immutara_core::domain::search::SearchMatchKind::Visual
+                        })
+                        .count(),
+                    selected_index: result.selected_index(),
+                    social_state: format!("{:?}", result.social_state),
                 });
                 self.stage(StageId::Search).complete();
             }
@@ -330,7 +403,12 @@ impl App {
             } => {
                 self.search = Some(SearchInfo {
                     provider_id: provider_id.clone(),
+                    search_input: "n/a".to_string(),
                     matches: Vec::new(),
+                    exact_count: 0,
+                    visual_count: 0,
+                    selected_index: None,
+                    social_state: "NO_RESULTS".to_string(),
                 });
                 self.stage(StageId::Search).fail(error.clone());
             }
@@ -644,14 +722,35 @@ mod tests {
             result: SearchResult {
                 evidence_id: id,
                 provider_id: "mock-search".into(),
-                matches: vec![SearchMatch {
-                    source_url: Some("https://example.com/x".into()),
-                    source_description: None,
-                    provider_score: 0.85,
-                    first_seen: None,
-                    thumbnail_url: None,
-                }],
+                search_input: immutara_core::domain::search::SearchInputKind::FaceCrop,
+                matches: vec![
+                    SearchMatch {
+                        match_kind: immutara_core::domain::search::SearchMatchKind::Exact,
+                        source_url: Some("https://example.net/exact".into()),
+                        source_domain: Some("example.net".into()),
+                        source_title: None,
+                        source_description: Some("example".into()),
+                        provider_score: f64::NAN,
+                        position: Some(1),
+                        first_seen: None,
+                        thumbnail_url: None,
+                        media_match: None,
+                    },
+                    SearchMatch {
+                        match_kind: immutara_core::domain::search::SearchMatchKind::Visual,
+                        source_url: Some("https://example.com/x".into()),
+                        source_domain: Some("example.com".into()),
+                        source_title: None,
+                        source_description: None,
+                        provider_score: 0.85,
+                        position: Some(1),
+                        first_seen: None,
+                        thumbnail_url: None,
+                        media_match: None,
+                    },
+                ],
                 searched_at: Utc::now(),
+                social_state: immutara_core::domain::search::SearchMatchState::WebMatch,
             },
         }
     }
@@ -687,6 +786,7 @@ mod tests {
             content_hash: ContentHash("a".repeat(64)),
             metadata_hash: ContentHash("m".repeat(64)),
             verification_result_hash: ContentHash("v".repeat(64)),
+            search_result_hash: ContentHash("s".repeat(64)),
             verification_policy_version: SchemaVersion(1),
             provider_id: "mock-attestation".into(),
             chain_id: "0x1".into(),
@@ -720,6 +820,7 @@ mod tests {
                 content_hash: ContentHash("a".repeat(64)),
                 metadata_hash: ContentHash("m".repeat(64)),
                 verification_result_hash: ContentHash("v".repeat(64)),
+                search_result_hash: ContentHash("s".repeat(64)),
                 verification_policy_version: SchemaVersion(1),
                 provider_id: "mock-attestation".into(),
                 chain_id: "0x1".into(),
@@ -781,7 +882,10 @@ mod tests {
 
         // Detail summaries populated.
         assert_eq!(app.analysis.as_ref().unwrap().objects, 1);
-        assert_eq!(app.search.as_ref().unwrap().matches.len(), 1);
+        assert_eq!(app.search.as_ref().unwrap().matches.len(), 2);
+        let search_info = app.search.as_ref().unwrap();
+        assert_eq!(search_info.selected_index, Some(0), "exact match selected");
+        assert_eq!(search_info.matches[0].match_kind, "exact");
         assert_eq!(app.verification.as_ref().unwrap().policy_version, 1);
         assert_eq!(app.attestation.as_ref().unwrap().block_number, Some(42));
     }

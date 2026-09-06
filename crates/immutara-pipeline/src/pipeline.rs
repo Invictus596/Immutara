@@ -15,14 +15,16 @@ use immutara_core::ImmutaraError;
 use immutara_core::domain::analysis::AnalysisResult;
 use immutara_core::domain::attestation::{AttestationRecord, BlockchainVerification};
 use immutara_core::domain::evidence::{Evidence, EvidenceId, SchemaVersion};
-use immutara_core::domain::search::SearchResult;
+use immutara_core::domain::search::{SearchInput, SearchResult};
 use immutara_core::domain::verification::{VerificationPolicy, VerificationResult};
 use immutara_core::providers::{AnalysisProvider, AttestationProvider, ImageSearchProvider};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::event::PipelineEvent;
+use crate::face_crop;
 use crate::hashing::hash_canonical;
+use crate::media_validation::{MediaMatchValidator, ValidationQuery};
 use crate::stages::{self, ingest::IngestInput};
 
 /// Input describing a single evidence item to process.
@@ -49,10 +51,14 @@ pub struct Pipeline {
     search: Arc<dyn ImageSearchProvider>,
     attestation: Arc<dyn AttestationProvider>,
     pipeline_version: String,
+    media_validator: Option<MediaMatchValidator>,
 }
 
 impl Pipeline {
     /// Create a pipeline from the three provider implementations.
+    ///
+    /// Media validation is off unless enabled with
+    /// [`Self::with_media_validator`].
     pub fn new(
         event_tx: mpsc::Sender<PipelineEvent>,
         analysis: Arc<dyn AnalysisProvider>,
@@ -65,7 +71,14 @@ impl Pipeline {
             search,
             attestation,
             pipeline_version: env!("CARGO_PKG_VERSION").to_string(),
+            media_validator: None,
         }
+    }
+
+    /// Enable independent media-match validation for providers that opt in.
+    pub fn with_media_validator(mut self, validator: Option<MediaMatchValidator>) -> Self {
+        self.media_validator = validator;
+        self
     }
 
     async fn emit(&self, event: PipelineEvent) {
@@ -114,7 +127,7 @@ impl Pipeline {
         let analysis = self.run_analysis(&evidence).await;
 
         // ---- Search (async I/O) ----
-        let search = self.run_search(&evidence).await;
+        let search = self.run_search(&evidence, analysis.as_ref()).await;
 
         // ---- Verify (sync, deterministic) ----
         self.emit(PipelineEvent::VerificationStarted {
@@ -144,7 +157,7 @@ impl Pipeline {
         .await;
 
         // ---- Attest (async I/O) ----
-        self.run_attest(&evidence, &verification, &input.policy)
+        self.run_attest(&evidence, &verification, search.as_ref(), &input.policy)
             .await?;
 
         self.emit(PipelineEvent::PipelineCompleted {
@@ -181,14 +194,31 @@ impl Pipeline {
         }
     }
 
-    async fn run_search(&self, evidence: &Evidence) -> Option<SearchResult> {
+    async fn run_search(
+        &self,
+        evidence: &Evidence,
+        analysis: Option<&AnalysisResult>,
+    ) -> Option<SearchResult> {
         self.emit(PipelineEvent::SearchStarted {
             evidence_id: evidence.id,
             provider_id: self.search.provider_id().to_string(),
         })
         .await;
-        match self.search.search(evidence).await {
-            Ok(result) => {
+
+        let input = self.build_search_input(evidence, analysis);
+        match self.search.search_with_input(evidence, &input).await {
+            Ok(mut result) => {
+                if self.search.supports_media_validation()
+                    && let Some(validator) = &self.media_validator
+                    && let Some(photo) = Self::photo_bytes(evidence)
+                {
+                    let query = ValidationQuery {
+                        searched: Self::query_bytes(&input, evidence)
+                            .unwrap_or_else(|| photo.clone()),
+                        photo,
+                    };
+                    validator.validate_matches(&mut result, &query).await;
+                }
                 self.emit(PipelineEvent::SearchCompleted {
                     evidence_id: evidence.id,
                     result: result.clone(),
@@ -208,10 +238,60 @@ impl Pipeline {
         }
     }
 
+    /// Build the search input: prefer the selected face crop (local, padded,
+    /// re-encoded) and fall back to the full image when no face was detected
+    /// or the crop cannot be generated.
+    fn build_search_input(
+        &self,
+        evidence: &Evidence,
+        analysis: Option<&AnalysisResult>,
+    ) -> SearchInput {
+        let Some(selected_face) = analysis
+            .and_then(|a| a.face_analysis.as_ref())
+            .and_then(|f| f.selected_face.as_ref())
+        else {
+            return SearchInput::FullImage;
+        };
+        let Some(source_path) = &evidence.metadata.source_path else {
+            return SearchInput::FullImage;
+        };
+
+        match std::fs::read(source_path) {
+            Ok(bytes) => {
+                match face_crop::generate_face_crop(&bytes, selected_face.bounding_box, 500_000) {
+                    Ok(crop) => SearchInput::FaceCrop(crop),
+                    Err(_) => SearchInput::FullImage,
+                }
+            }
+            Err(_) => SearchInput::FullImage,
+        }
+    }
+
+    /// The exact image bytes that were searched: the face-crop bytes when a
+    /// crop was submitted, otherwise the full image on disk. Used as the query
+    /// for media-match validation.
+    fn query_bytes(input: &SearchInput, evidence: &Evidence) -> Option<Vec<u8>> {
+        match input {
+            SearchInput::FaceCrop(crop) => Some(crop.image_bytes.clone()),
+            SearchInput::FullImage => {
+                let source_path = evidence.metadata.source_path.as_ref()?;
+                std::fs::read(source_path).ok()
+            }
+        }
+    }
+
+    /// The full evidence photograph bytes on disk (the validation baseline for
+    /// perceptual media comparison when a face crop was searched).
+    fn photo_bytes(evidence: &Evidence) -> Option<Vec<u8>> {
+        let source_path = evidence.metadata.source_path.as_ref()?;
+        std::fs::read(source_path).ok()
+    }
+
     async fn run_attest(
         &self,
         evidence: &Evidence,
         verification: &VerificationResult,
+        search: Option<&SearchResult>,
         policy: &VerificationPolicy,
     ) -> Result<(), ImmutaraError> {
         self.emit(PipelineEvent::AttestationStarted {
@@ -221,6 +301,12 @@ impl Pipeline {
 
         let metadata_hash = hash_canonical(&CanonicalSerializeForHashing(&evidence.metadata))?;
         let verification_hash = hash_canonical(&CanonicalSerializeForHashing(verification))?;
+        // Bind the single most-relevant discovered result into the record via
+        // its canonical hash: the first exact Lens match when one exists,
+        // otherwise the first visual match (deterministic; `None` when no
+        // result exists).
+        let selected_result = search.and_then(|s| s.selected());
+        let search_result_hash = crate::hashing::search_result_hash(selected_result)?;
 
         let record = AttestationRecord {
             schema_version: SchemaVersion(1),
@@ -229,6 +315,7 @@ impl Pipeline {
             content_hash: evidence.content_hash.clone(),
             metadata_hash,
             verification_result_hash: verification_hash,
+            search_result_hash,
             verification_policy_version: policy.version,
             provider_id: self.attestation.provider_id().to_string(),
             chain_id: self.attestation.chain_id().to_string(),

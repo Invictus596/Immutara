@@ -18,6 +18,13 @@ pub struct VerificationPolicy {
     pub min_analysis_confidence: f64,
     pub required_providers: Vec<String>,
     pub max_evidence_age: Option<Duration>,
+    /// When true, verification only passes when the search stage produced a
+    /// `SOCIAL_MATCH_VERIFIED` result (independent media-match validation).
+    ///
+    /// Defaults to `false` so existing policies and generic-web provenance
+    /// keep working unchanged. The final demonstration config sets it `true`.
+    #[serde(default)]
+    pub social_match_verified: bool,
 }
 
 /// The outcome of a single check within a verification run.

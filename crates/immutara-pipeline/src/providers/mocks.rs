@@ -16,7 +16,7 @@ use immutara_core::domain::attestation::{
     AttestationReceipt, AttestationRecord, BlockchainVerification,
 };
 use immutara_core::domain::evidence::{ContentHash, Evidence};
-use immutara_core::domain::search::{SearchMatch, SearchResult};
+use immutara_core::domain::search::{SearchMatch, SearchMatchKind, SearchResult};
 use immutara_core::providers::{AnalysisProvider, AttestationProvider, ImageSearchProvider};
 use tokio::sync::Mutex;
 
@@ -97,11 +97,16 @@ impl Default for MockSearchProvider {
         Self {
             provider_id: "mock-search".to_string(),
             matches: vec![SearchMatch {
+                match_kind: SearchMatchKind::Visual,
                 source_url: Some("https://example.com/mock".to_string()),
+                source_domain: Some("example.com".to_string()),
+                source_title: None,
                 source_description: None,
                 provider_score: 0.9,
+                position: Some(1),
                 first_seen: None,
                 thumbnail_url: None,
+                media_match: None,
             }],
             fail_with: None,
             calls: Arc::new(Mutex::new(0)),
@@ -122,8 +127,10 @@ impl ImageSearchProvider for MockSearchProvider {
         Ok(SearchResult {
             evidence_id: evidence.id,
             provider_id: self.provider_id.clone(),
+            search_input: immutara_core::domain::search::SearchInputKind::FullImage,
             matches: self.matches.clone(),
             searched_at: Utc::now(),
+            social_state: immutara_core::domain::search::SearchMatchState::NoResults,
         })
     }
 

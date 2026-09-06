@@ -83,15 +83,16 @@ The pipeline publishes a single authoritative `PipelineEvent` stream through a
 - `AnalysisProvider` — computer-vision analysis (`opencv` real provider via a
   Python subprocess, or `mock`)
 - `ImageSearchProvider` — reverse-image search (`tineye` real provider over the
-  public web, or `mock`)
+  public web, `serpapi_lens` real Google Lens provider, or `mock`)
 - `AttestationProvider` — ledger/blockchain attestation (`evm` real provider,
   or `mock`)
 
 Mock implementations in `immutara-pipeline/src/providers/mocks.rs`
 exercise the full pipeline deterministically. The real analysis provider lives
 in `immutara-pipeline/src/providers/python_analysis.rs`; the real reverse-image
-search provider lives in `immutara-pipeline/src/providers/tineye.rs`; the real
-EVM provider lives in `immutara-pipeline/src/providers/evm.rs`.
+search providers live in `immutara-pipeline/src/providers/tineye.rs` and
+`immutara-pipeline/src/providers/serpapi_lens.rs`; the real EVM provider lives
+in `immutara-pipeline/src/providers/evm.rs`.
 
 ### Canonical serialization
 
@@ -129,6 +130,19 @@ across processes and versions.
       TinEye API over the public web, real scores/URLs mapped to `SearchMatch`,
       config-driven provider selection (`mock` vs `tineye`), search failure
       non-fatal
+- [x] **Real Google Lens search** (`serpapi_lens` provider): face-crop-first
+      upload to SerpApi's Lens API over the public web, real match URLs mapped
+      to `SearchMatch` (position preserved, provider score honestly `n/a`),
+      social-media classification by host, full-image fallback when the crop
+      has no matches, **exact matches preferred and visual matches as
+      fallback**, config-driven selection (`mock` vs `serpapi_lens`), and an
+      opt-in live E2E test
+- [x] **Search result bound into the attestation** — the **selected** result
+      (first exact Lens match, else first visual) is hashed through its
+      canonical `match_kind`-aware representation and committed as
+      `search_result_hash` on `AttestationRecord`, so the on-chain attestation
+      commits to the discovered source and whether it was an exact or visual
+      match
 - [x] **Real EVM attestation** (`evm` provider): minimal `AttestationRegistry`
       Solidity contract (hash anchors only), deployment via Foundry, real
       on-chain writes over Alloy, on-chain read-back re-verification with
@@ -168,6 +182,14 @@ immutara tui -f path/to/evidence.png     # live TUI of the event stream
 # All commands accept an optional config file (default: config/default.toml)
 immutara run -f path/to/evidence.png -c config/my.toml
 ```
+
+`run` prints a concise **IMMUTARA RUN SUMMARY** after success: the face-analysis
+summary (detector, faces, selected-face confidence/bbox, embedding fingerprint),
+the search result (provider, FACE CROP / FULL IMAGE input, exact/visual counts,
+the **selected (attested) result** with its kind, rank, URL and domain, plus the
+top matches), the verification verdict, and the attestation anchor (record hash,
+search-result hash, transaction and block). This mirrors exactly what the TUI
+detail panels show.
 
 ## Real face analysis (OpenCV provider)
 
@@ -245,9 +267,7 @@ provider = "tineye"
 ### Why TinEye
 
 TinEye is a commercial, official reverse-image-search API over the public web.
-It was chosen over alternatives (Google Custom Search / Bing / SerpAPI, which
-do not accept raw image uploads; and niche similarity vendors that search your
-*own* catalog rather than the public web) because it:
+It was chosen for the original real search provider because it:
 
 - accepts a **direct image upload** (multipart `image_upload`) — matching our
   local `EvidenceMetadata.source_path` input, with no need to host the image
@@ -259,6 +279,11 @@ do not accept raw image uploads; and niche similarity vendors that search your
   date — mapping cleanly onto `SearchMatch`;
 - has a documented, stable REST + JSON interface and official client
   libraries (pytineye, Node, PHP).
+
+**Google Lens is added as a second real provider** (`serpapi_lens`) because it
+is the de-facto public reverse-image-search engine, and it too accepts a raw
+image upload (face-crop first, full-image fallback) through SerpApi — see
+[Real reverse-image search (SerpApi Google Lens provider)](#real-reverse-image-search-serpapi-google-lens-provider).
 
 ### Credentials and modes
 
@@ -351,6 +376,225 @@ errors are reported; only search stage contributes nothing to verification.
   Immutara never fabricates a provider score.
 - TinEye requires a recognized image format (JPEG/PNG/WebP/GIF/BMP/AVIF/TIFF);
   animated formats are unsupported.
+
+## Real reverse-image search (SerpApi Google Lens provider)
+
+In addition to `tineye`, the search stage can use **real Google Lens** via the
+SerpApi image-search API. Set `provider = "serpapi_lens"`:
+
+```toml
+[search]
+provider = "serpapi_lens"
+
+[search.serpapi_lens]
+api_url = "https://serpapi.com"   # optional, defaults to SerpApi
+timeout_seconds = 60
+max_upload_bytes = 500000
+```
+
+### Credentials
+
+The provider reads its key from the `SERPAPI_API_KEY` environment variable at
+run time (no config fallback, never committed). SerpApi has **no public
+sandbox key**, so a real key is always required; requests for a missing or
+invalid key surface a typed "authentication failed" error. The key is sent as
+a multipart form field on the `/image` upload and as a query parameter on the
+`/search` call (Bearer headers are rejected by the API).
+
+### Face-crop-first search input
+
+The pipeline extracts the **selected face bounding box** with OpenCV/YuNet
+during analysis, then `face_crop::generate_face_crop` produces a padded
+(pad = 0.25 per side), clamped, JPEG-quality-90 crop capped at
+`max_upload_bytes` (progressive 0.75 downsampling) before upload.
+
+Search input is a first-class enum on `SearchResult.search_input`:
+
+| Input kind          | When used                                                    |
+| ------------------- | ------------------------------------------------------------ |
+| `FACE CROP`         | Analysis found a selected face **and** a readable `source_path` produced a valid crop |
+| `FULL IMAGE`        | No usable face crop (no face, unreadable file, crop failure) |
+
+The crop is searched first; **fallback to the full image happens only when the
+crop search returns zero matches** (never on an error — errors propagate). The
+TUI shows `Search input: FACE CROP` / `FULL IMAGE` accordingly.
+
+### Request flow
+
+1. Upload the crop (or full image) to `POST {api_url}/image` (multipart,
+   `api_key` + `image`). Retries (×3) cover transient network/timeout faults.
+2. Query `GET {api_url}/search?engine=google_lens&image_id=…&json_format=1`.
+3. `exact_matches[]` (Google considers them the **same picture**) are mapped
+   first, then `visual_matches[]` as the fallback tier. Each `SearchMatch`
+   carries a `match_kind` (`exact` / `visual`). Lens exposes no relevance
+   score, so `provider_score` is `NaN` ("no signal") and **never fabricated**
+   — the TUI renders it as "match (score n/a)". Real engine ordering is
+   preserved in `position`; `source_domain` is derived from each result URL via
+   `hostname_of`.
+4. A result is classified as **social media** (`is_social_media_url`) purely by
+   its host (reddit, x/twitter, facebook, instagram, youtube, tiktok, linkedin,
+   pinterest, tumblr, threads, snapchat, weibo, vk). This is a syntactic
+   classification of the returned URL — it does **not** assert that the page is
+   reachable or that the person is who it appears to be.
+
+### Selecting the attested result
+
+The single result bound into the attestation is the one selected by
+`SearchResult::selected()`: a **media-verified social match** when one exists,
+otherwise the **first exact match** when any exist, otherwise the **first
+visual match**. A media-verified social match is the strongest provenance
+(independent validation confirmed the public media contains the searched
+image); exact provider matches are stronger than visual ones. The selection is
+deterministic and re-derivable from the events.
+
+### Binding into the attestation
+
+The pipeline commits `SHA-256(canonical_bytes(selected))` (the selected
+result's canonical hash, including any media-match evidence, `exact` kind
+whenever available; canonical `null` when nothing matched) as
+`search_result_hash` on the `AttestationRecord`, which flows into `recordHash`
+on-chain. **The blockchain attestation therefore commits to the discovered
+source/result — the media-match validation evidence, and whether it was an
+exact or visual match — through its canonical hash**; the commitment is
+reproducible by recomputing from the events.
+
+### Independent media-match validation
+
+Search providers return *candidate* pages for the searched face crop; Immutara
+then independently fetches the candidate's public media and compares it to the
+searched image with deterministic hashes:
+
+1. **Exact hash** — the fetched media bytes are SHA-256-identical to the
+   searched image (`method = exact_hash`, `distance = 0`).
+2. **Perceptual hash** — otherwise a 64-bit dHash (grayscale 9×8 Triangle
+   resize) is compared by Hamming distance against a fixed threshold of 12
+   (`method = perceptual_hash`, `distance`, `threshold`).
+
+Media sources are tried in order: the provider-returned image URL, the page's
+`og:image`, then the first absolute `<img src>` on the page. A source that
+*passes* immediately settles the match; a fetched-but-failing source is recorded
+as *unverified* evidence and the page's own media is still consulted, because
+the full-size upload (`og:image`) often matches where a tiny hosted crop does
+not. Validation never bypasses access controls — a login wall, 4xx, non-image
+content, or oversized media records honest *unverified* evidence instead. Every
+comparison records a `MediaMatchEvidence { method, distance, threshold, passed,
+media_url, note }` on the match, and the search stage exposes one overall state:
+
+| State | Meaning |
+|---|---|
+| `NO_RESULTS` | No matches at all. |
+| `WEB_MATCH` | Only non-social matches returned. |
+| `SOCIAL_CANDIDATE` | A social-domain match exists, not yet media-validated. |
+| `SOCIAL_CANDIDATE_UNVERIFIED` | A social match was attempted but the media could not be independently confirmed (login wall, unreachable, non-image, or the comparison failed). |
+| `SOCIAL_MATCH_VERIFIED` | A social match's public media was fetched and visually matches the searched image. |
+
+The validation query carries **two byte-sets**: the exact bytes submitted to
+the search provider (the face crop when one was detected, the full image
+otherwise) *and* the full evidence photograph on disk. Byte identity is judged
+against either; perceptual matching compares against the closer of the two and
+records which form won in `note`, so a tight face crop does not silently fail
+against a page thumbnail of the whole photograph. The validator never reuses
+the facial-recognition model and never claims identity. Because validation
+performs real HTTP fetches during a run, it is enabled per provider (real
+providers opt in; mock/harness providers stay offline).
+
+A strict competition policy can require a verified social match:
+
+```toml
+[verification.policy]
+social_match_verified = true
+```
+
+With this set, verification adds a `social_match_verified` check that fails
+unless the search state is `SOCIAL_MATCH_VERIFIED`. The default remains
+`false`, preserving the generic-web path unchanged.
+
+### Example live results
+
+Executed in this environment with a real key against two public-domain images.
+Results are runtime-discovered, not hardcoded; a representative strict run on a
+NASA public-domain photograph (no face → full-image search) looked like:
+
+```text
+Search   : provider serpapi_lens | input FULL IMAGE | 59 matches (0 exact, 59 visual) | state SocialMatchVerified
+  selected (attested): [visual] #18 https://www.reddit.com/r/space/comments/rk0a0t/the_earth_seemingly_rising_above_the_lunar/ | domain reddit.com
+  social: https://www.instagram.com/p/DcZhPDWAIIK/
+  media    : VERIFIED perceptual_hash (distance 0/12) — perceptual match against searched image | url https://encrypted-tbn0.gstatic.com/images?q=tbn:…
+Verify   : policy v1 | checks 3: 3 passed | verdict PASS
+   [PASS] social_match_verified
+Attest   : provider evm | VERIFIED (read-back matches)
+```
+
+The same pipeline exercises the **face-crop-first** path on public-domain
+portraits. A canonical-repost subject (Leonardo's *Mona Lisa*, PD) verifies
+end-to-end: Lens returns public Instagram reposts of the painting whose Google
+thumbnails are downscales of the identical frame, so the perceptual match
+passes at `distance ≤ 12` and the strict run reports `SOCIAL_MATCH_VERIFIED`,
+`verdict PASS`, and a matching on-chain read-back (see
+[Demo test assets and provenance](#demo-test-assets-and-provenance)). By contrast
+an official presidential portrait (face-crop search) found social candidates
+(Instagram and Facebook pages) but none had publicly retrievable media matching
+the crop; under the strict policy that check honestly reports
+`SOCIAL_CANDIDATE_UNVERIFIED` and `verdict FAIL`, and the failed record is still
+attested so the decision is not lost. That failure is the point: the system
+never claims a match it cannot independently confirm.
+
+### Testing
+
+```bash
+# Offline unit tests (mock HTTP) — run with the whole workspace
+cargo test --workspace
+
+# Opt-in live test against real SerpApi (requires a real key):
+IMMUTARA_E2E_SEARCH=1 SERPAPI_API_KEY=… cargo test -p immutara-pipeline \
+    real_serpapi_lens_crop_search_returns_social_matches -- --nocapture
+```
+
+### Failure behavior
+
+Search failures are non-fatal (same as `tineye`): missing/unreadable image, no
+`source_path`, missing/invalid key, network errors, timeouts, HTTP 4xx/5xx, rate
+limiting (429), malformed JSON, and empty matches map to typed `ImmutaraError`
+values; the pipeline records `SearchFailed` and continues. Missing keys abort
+the search immediately with a clear configuration error.
+
+### Limitations
+
+- Real Google Lens search requires a SerpApi key (free tier is rate-limited);
+  it is a commercial API and results depend on their index.
+- Lens has no numeric relevance score; the plugin never invents one.
+- Social classification is host-based only — Immutara does not verify page
+  ownership or reachability, and does not identify people.
+- The face crop searches the same public index as the full image; garbage in →
+  garbage out remains true.
+
+## Media discovery tool (dev only)
+
+`crates/immutara-pipeline/src/bin/discover.rs` is a disposable investigator's
+tool. Given one or more images it runs the exact production stages — detection
++ face crop, Lens search, media validation — and prints the strongest candidate
+per image. No URLs are hardcoded, no scores fabricated; the output is the same
+deterministic evidence the pipeline would produce. It is not part of the
+attestation path.
+
+```bash
+export SERPAPI_API_KEY=…          # real key, required
+cargo run -p immutara-pipeline --bin discover -- ./test_images/obama.jpg
+```
+
+## Demo test assets and provenance
+
+The two checked-in demo images are public-domain U.S. government works, fetched
+from Wikimedia Commons via its API (license fields verified before download):
+
+| File | Source (Commons) | Provenance | Size / dims |
+|---|---|---|---|
+| `test_images/mona_lisa.jpg` | `Mona Lisa, by Leonardo da Vinci, from C2RMF retouched.jpg` | Leonardo da Vinci, c. 1503–1506 (Louvre); C2RMF-retouched scan, Commons license `Public domain`. 2048-px derivative rendered from the 94 MB master with cv2 `INTER_AREA`. Face fixture that demonstrably reaches `SOCIAL_MATCH_VERIFIED` (verified Instagram reposts). | 3 465 931 B, 2048×3052 |
+| `test_images/earthrise.jpg` | `NASA-Apollo8-Dec24-Earthrise.jpg` (`Commons: a/a8`) | NASA/Apollo 8, photo by astronaut Bill Anders; Commons license `Public domain` (PD-USGov-NASA). No face → exercises full-image search. | 311 263 B, 2400×2400 |
+| `test_images/obama.jpg` | `President_Barack_Obama.jpg` (`Commons: 8/8d`) | Official White House portrait (Canon EOS 5D Mark III, 2012-12-06), PD-USGov; Commons license `Public domain`. Multiple faces → exercises face-crop search. | 1 276 121 B, 2687×3356 |
+
+Download commands used (Commons `action=query&prop=imageinfo&iiprop=url|size|extmetadata`
+used to confirm the license short name before saving each file).
 
 ## Real EVM attestation
 
@@ -459,8 +703,11 @@ The single-view layout shows:
   dimensions when available), analysis info (provider, model, object count,
   confidence, plus the face-analysis summary: detector/recognizer models,
   faces detected, selected-face confidence, and embedding dimensionality —
-  never a raw embedding), search info (provider, results, source URLs,
-  provider score), verification info (policy version, individual PASS/FAIL checks,
+  never a raw embedding), search info (provider, **search input** — FACE CROP
+  vs FULL IMAGE, exact/visual counts, the **selected result** with its exact/
+  visual kind, rank, URL, domain and position, plus the match list with per-
+  match kind/rank/domain/score), verification info (policy version, individual
+  PASS/FAIL checks,
   timestamp), and attestation info (provider, chain ID, contract address,
   attestation id, tx hash, block number, and a `VERIFIED` / `FAILED` verdict);
 - a scrollable **EVENT LOG** where failures are clearly flagged.

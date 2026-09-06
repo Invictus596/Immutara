@@ -65,10 +65,12 @@ pub fn verify(input: VerifyInput) -> Result<VerificationResult, ImmutaraError> {
             ),
         });
 
-        let similarity_ok = search
-            .matches
-            .iter()
-            .all(|m| m.provider_score >= input.policy.min_provider_score);
+        // A provider that supplies no relevance score (NaN, e.g. the Lens
+        // provider) cannot be judged by a numeric threshold: the score
+        // criterion applies only where a real score is present.
+        let similarity_ok = search.matches.iter().all(|m| {
+            m.provider_score.is_nan() || m.provider_score >= input.policy.min_provider_score
+        });
         checks.push(VerificationCheck {
             name: "min_provider_score".to_string(),
             passed: similarity_ok,
@@ -87,6 +89,20 @@ pub fn verify(input: VerifyInput) -> Result<VerificationResult, ImmutaraError> {
                 details: "required providers satisfied".to_string(),
             });
         }
+    }
+
+    if input.policy.social_match_verified {
+        let social_ok = input.search.is_some()
+            && input.search.unwrap().social_state
+                == immutara_core::domain::search::SearchMatchState::SocialMatchVerified;
+        checks.push(VerificationCheck {
+            name: "social_match_verified".to_string(),
+            passed: social_ok,
+            details: format!(
+                "search state {:?} (requires a media-verified social match)",
+                input.search.map(|s| s.social_state)
+            ),
+        });
     }
 
     let passed = checks.iter().all(|c| c.passed);
@@ -108,6 +124,7 @@ mod tests {
     };
     use immutara_core::domain::provenance::ProvenanceChain;
     use immutara_core::domain::search::SearchMatch;
+    use immutara_core::domain::search::SearchMatchKind;
 
     fn sample_evidence() -> Evidence {
         Evidence {
@@ -135,6 +152,7 @@ mod tests {
             min_analysis_confidence: 0.5,
             required_providers: vec![],
             max_evidence_age: None,
+            social_match_verified: false,
         }
     }
 
@@ -142,8 +160,10 @@ mod tests {
         SearchResult {
             evidence_id: EvidenceId::new(),
             provider_id: "mock".into(),
+            search_input: immutara_core::domain::search::SearchInputKind::FullImage,
             matches,
             searched_at: Utc::now(),
+            social_state: immutara_core::domain::search::SearchMatchState::NoResults,
         }
     }
 
@@ -184,11 +204,16 @@ mod tests {
         let evidence = sample_evidence();
         let policy = sample_policy();
         let search = sample_search(vec![SearchMatch {
+            match_kind: SearchMatchKind::Visual,
             source_url: None,
+            source_domain: None,
+            source_title: None,
             source_description: None,
             provider_score: 0.9,
+            position: None,
             first_seen: None,
             thumbnail_url: None,
+            media_match: None,
         }]);
         let result = verify(VerifyInput {
             evidence: &evidence,
@@ -205,11 +230,16 @@ mod tests {
         let evidence = sample_evidence();
         let policy = sample_policy();
         let search = sample_search(vec![SearchMatch {
+            match_kind: SearchMatchKind::Visual,
             source_url: None,
+            source_domain: None,
+            source_title: None,
             source_description: None,
             provider_score: 0.1,
+            position: None,
             first_seen: None,
             thumbnail_url: None,
+            media_match: None,
         }]);
         let result = verify(VerifyInput {
             evidence: &evidence,
@@ -289,5 +319,87 @@ mod tests {
         })
         .unwrap();
         assert!(!result.passed);
+    }
+
+    #[test]
+    fn social_match_verified_requires_verified_social_state() {
+        let evidence = sample_evidence();
+        let policy = VerificationPolicy {
+            social_match_verified: true,
+            min_search_matches: 0,
+            ..sample_policy()
+        };
+
+        // Unverified social candidate -> fails.
+        let base = |url: &str| SearchMatch {
+            match_kind: SearchMatchKind::Visual,
+            source_url: Some(url.into()),
+            source_domain: None,
+            source_title: None,
+            source_description: None,
+            provider_score: 0.9,
+            position: None,
+            first_seen: None,
+            thumbnail_url: None,
+            media_match: None,
+        };
+        let mut unverified = base("https://reddit.com/r/x/1");
+        unverified.media_match = Some(immutara_core::domain::search::MediaMatchEvidence {
+            method: None,
+            distance: None,
+            threshold: Some(12),
+            passed: false,
+            media_url: None,
+            note: Some("login wall".into()),
+        });
+        let mut search_failed = sample_search(vec![unverified]);
+        search_failed.social_state =
+            immutara_core::domain::search::SearchMatchState::SocialCandidateUnverified;
+        let result = verify(VerifyInput {
+            evidence: &evidence,
+            analysis: None,
+            search: Some(&search_failed),
+            policy: &policy,
+        })
+        .unwrap();
+        assert!(!result.passed);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.name == "social_match_verified")
+        );
+
+        // No search at all -> the check fails too (never vacuous).
+        let result = verify(VerifyInput {
+            evidence: &evidence,
+            analysis: None,
+            search: None,
+            policy: &policy,
+        })
+        .unwrap();
+        assert!(!result.passed);
+
+        // Media-verified social match -> passes.
+        let mut verified = base("https://reddit.com/r/x/2");
+        verified.media_match = Some(immutara_core::domain::search::MediaMatchEvidence {
+            method: Some(immutara_core::domain::search::MediaMatchMethod::PerceptualHash),
+            distance: Some(4),
+            threshold: Some(12),
+            passed: true,
+            media_url: Some("https://external.redditmedia.com/a.jpg".into()),
+            note: None,
+        });
+        let mut search_ok = sample_search(vec![verified]);
+        search_ok.social_state =
+            immutara_core::domain::search::SearchMatchState::SocialMatchVerified;
+        let result = verify(VerifyInput {
+            evidence: &evidence,
+            analysis: None,
+            search: Some(&search_ok),
+            policy: &policy,
+        })
+        .unwrap();
+        assert!(result.passed);
     }
 }

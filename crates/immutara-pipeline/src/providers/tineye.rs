@@ -35,7 +35,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use immutara_core::ImmutaraError;
 use immutara_core::config::TineyeSearchConfig;
 use immutara_core::domain::evidence::Evidence;
-use immutara_core::domain::search::{SearchMatch, SearchResult};
+use immutara_core::domain::search::{SearchMatch, SearchMatchKind, SearchResult};
 use immutara_core::providers::ImageSearchProvider;
 use serde::Deserialize;
 
@@ -256,8 +256,10 @@ impl TineyeImageSearchProvider {
         SearchResult {
             evidence_id: evidence.id,
             provider_id: self.provider_id.clone(),
+            search_input: immutara_core::domain::search::SearchInputKind::FullImage,
             matches,
             searched_at: Utc::now(),
+            social_state: Default::default(),
         }
     }
 
@@ -287,11 +289,16 @@ impl TineyeImageSearchProvider {
             .find_map(|b| parse_crawl_date(b.crawl_date.as_deref()));
 
         Some(SearchMatch {
+            match_kind: SearchMatchKind::Visual,
             source_url,
+            source_domain: m.domain.clone(),
+            source_title: None,
             source_description,
             provider_score,
+            position: None,
             first_seen,
             thumbnail_url: m.image_url,
+            media_match: None,
         })
     }
 }
@@ -343,6 +350,10 @@ impl ImageSearchProvider for TineyeImageSearchProvider {
 
     fn provider_id(&self) -> &str {
         &self.provider_id
+    }
+
+    fn supports_media_validation(&self) -> bool {
+        true
     }
 }
 

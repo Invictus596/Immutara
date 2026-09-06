@@ -25,6 +25,11 @@ pub struct AttestationRecord {
     pub content_hash: ContentHash,
     pub metadata_hash: ContentHash,
     pub verification_result_hash: ContentHash,
+    /// Canonical hash of the single most-relevant discovered result. This
+    /// cryptographically binds the concrete public source/social-media URL
+    /// found by the search stage into the on-chain record, so the anchor
+    /// commits to what the search actually discovered at runtime.
+    pub search_result_hash: ContentHash,
     pub verification_policy_version: SchemaVersion,
     pub provider_id: String,
     pub chain_id: String,
