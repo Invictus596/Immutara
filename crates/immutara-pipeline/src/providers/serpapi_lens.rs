@@ -3,7 +3,10 @@
 //! Shipped search input: the pipeline first searches the **selected face
 //! crop** (generated locally from the analysis bounding box) — the region
 //! that actually contains the face — and falls back to the full image when
-//! the crop yields no useful results.
+//! the crop yields no useful results. On top of this provider-level zero-match
+//! fallback, the pipeline retries the **full image** whenever this provider's
+//! crop result did not reach `SOCIAL_MATCH_VERIFIED` after independent media
+//! validation (see `Pipeline::run_search`).
 //!
 //! Selection rationale (Milestone 6, phase 1 live test succeeded):
 //! - Official, stable JSON interface. Google Lens requires uploading the

@@ -215,6 +215,9 @@ fn search_lines(app: &App) -> Vec<Line<'static>> {
                 ),
                 kv("Social", &s.social_state),
             ];
+            if let Some(fb) = &app.search_fallback {
+                v.push(indented(format!("  fallback: {fb}")));
+            }
             if let Some((si, m)) = s
                 .selected_index
                 .and_then(|si| s.matches.get(si).map(|m| (si, m)))

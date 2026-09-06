@@ -188,6 +188,7 @@ async fn print_run_summary(rx: &mut mpsc::Receiver<PipelineEvent>) {
 
     let mut analysis = None;
     let mut search = None;
+    let mut search_fallback = None;
     let mut verification = None;
     let mut attestation = None;
     while let Some(event) = rx.recv().await {
@@ -197,6 +198,20 @@ async fn print_run_summary(rx: &mut mpsc::Receiver<PipelineEvent>) {
             }
             PipelineEvent::SearchCompleted { result, .. } => {
                 search = Some(result);
+            }
+            PipelineEvent::SearchFallback {
+                attempted_input,
+                attempted_state,
+                reason,
+                ..
+            } => {
+                let input = match attempted_input {
+                    SearchInputKind::FaceCrop => "FACE CROP",
+                    SearchInputKind::FullImage => "FULL IMAGE",
+                };
+                search_fallback = Some(format!(
+                    "{input} (state {attempted_state:?}) -> FULL IMAGE fallback: {reason}"
+                ));
             }
             PipelineEvent::VerificationCompleted { result, .. } => {
                 verification = Some(result);
@@ -244,6 +259,9 @@ async fn print_run_summary(rx: &mut mpsc::Receiver<PipelineEvent>) {
         println!("Analysis : provider {}", a.provider_id);
     }
     if let Some(s) = search {
+        if let Some(note) = &search_fallback {
+            println!("Search   : {note}");
+        }
         let input = match s.search_input {
             SearchInputKind::FaceCrop => "FACE CROP",
             SearchInputKind::FullImage => "FULL IMAGE",

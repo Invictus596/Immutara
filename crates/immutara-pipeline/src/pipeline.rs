@@ -4,6 +4,10 @@
 //! `tokio::sync::mpsc::Sender`. It wires the individual stages together and
 //! runs them for a given piece of evidence, emitting an event for each
 //! transition. It holds no rendering concerns.
+//!
+//! The Search stage runs FACE CROP first when a face is available and falls
+//! back to a FULL IMAGE search (emitting `SearchFallback`) when a media
+//! validating provider's crop result did not reach `SOCIAL_MATCH_VERIFIED`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +19,7 @@ use immutara_core::ImmutaraError;
 use immutara_core::domain::analysis::AnalysisResult;
 use immutara_core::domain::attestation::{AttestationRecord, BlockchainVerification};
 use immutara_core::domain::evidence::{Evidence, EvidenceId, SchemaVersion};
-use immutara_core::domain::search::{SearchInput, SearchResult};
+use immutara_core::domain::search::{SearchInput, SearchInputKind, SearchMatchState, SearchResult};
 use immutara_core::domain::verification::{VerificationPolicy, VerificationResult};
 use immutara_core::providers::{AnalysisProvider, AttestationProvider, ImageSearchProvider};
 use tokio::sync::mpsc;
@@ -205,37 +209,113 @@ impl Pipeline {
         })
         .await;
 
+        // FACE CROP first: with a detected face we search the local, padded,
+        // re-encoded crop because the face is the discriminative signal when
+        // looking for a public repost of someone's photo.
         let input = self.build_search_input(evidence, analysis);
-        match self.search.search_with_input(evidence, &input).await {
-            Ok(mut result) => {
-                if self.search.supports_media_validation()
-                    && let Some(validator) = &self.media_validator
-                    && let Some(photo) = Self::photo_bytes(evidence)
-                {
-                    let query = ValidationQuery {
-                        searched: Self::query_bytes(&input, evidence)
-                            .unwrap_or_else(|| photo.clone()),
-                        photo,
-                    };
-                    validator.validate_matches(&mut result, &query).await;
-                }
+        let crop = match self.search_once(evidence, &input).await {
+            Ok(result) => {
                 self.emit(PipelineEvent::SearchCompleted {
                     evidence_id: evidence.id,
                     result: result.clone(),
                 })
                 .await;
-                Some(result)
+                result
             }
             Err(e) => {
+                // The crop search itself failed; nothing was learned, so no
+                // other input is attempted — report the failure honestly.
                 self.emit(PipelineEvent::SearchFailed {
                     evidence_id: evidence.id,
                     provider_id: self.search.provider_id().to_string(),
                     error: e.to_string(),
                 })
                 .await;
-                None
+                return None;
+            }
+        };
+
+        if !self.should_fallback_to_full(&crop) {
+            return Some(crop);
+        }
+
+        // The crop did not reach SOCIAL_MATCH_VERIFIED (zero matches, or
+        // candidates that failed perceptual media validation). Fall back to a
+        // FULL IMAGE search before conceding: the content-based signal often
+        // matches where the isolated face cannot.
+        self.emit(PipelineEvent::SearchFallback {
+            evidence_id: evidence.id,
+            attempted_input: crop.search_input,
+            attempted_state: crop.social_state,
+            reason: if crop.matches.is_empty() {
+                "the face crop yielded no search matches".to_string()
+            } else {
+                "the face crop yielded candidates but none reached \
+                 SOCIAL_MATCH_VERIFIED"
+                    .to_string()
+            },
+        })
+        .await;
+        self.emit(PipelineEvent::SearchStarted {
+            evidence_id: evidence.id,
+            provider_id: self.search.provider_id().to_string(),
+        })
+        .await;
+
+        match self.search_once(evidence, &SearchInput::FullImage).await {
+            Ok(full) => {
+                self.emit(PipelineEvent::SearchCompleted {
+                    evidence_id: evidence.id,
+                    result: full.clone(),
+                })
+                .await;
+                Some(full)
+            }
+            Err(e) => {
+                // The full-image fallback failed; the honest outcome is the
+                // already-reported crop result, not a fabricated score.
+                self.emit(PipelineEvent::SearchFailed {
+                    evidence_id: evidence.id,
+                    provider_id: self.search.provider_id().to_string(),
+                    error: e.to_string(),
+                })
+                .await;
+                Some(crop)
             }
         }
+    }
+
+    /// Whether the pipeline should retry the Search stage with the FULL IMAGE
+    /// after a FACE CROP search. Only providers that opt into media validation
+    /// participate: for them `social_state` reflects perceptual validation, and
+    /// anything short of `SOCIAL_MATCH_VERIFIED` does not justify attestation —
+    /// but it also should not stop the pipeline from trying the full image.
+    fn should_fallback_to_full(&self, crop: &SearchResult) -> bool {
+        self.search.supports_media_validation()
+            && crop.search_input == SearchInputKind::FaceCrop
+            && crop.social_state != SearchMatchState::SocialMatchVerified
+    }
+
+    /// Run a single provider search for `input` and, when the provider and
+    /// validator support it, run independent media validation on the matches.
+    /// Event emission is the caller's responsibility.
+    async fn search_once(
+        &self,
+        evidence: &Evidence,
+        input: &SearchInput,
+    ) -> Result<SearchResult, ImmutaraError> {
+        let mut result = self.search.search_with_input(evidence, input).await?;
+        if self.search.supports_media_validation()
+            && let Some(validator) = &self.media_validator
+            && let Some(photo) = Self::photo_bytes(evidence)
+        {
+            let query = ValidationQuery {
+                searched: Self::query_bytes(input, evidence).unwrap_or_else(|| photo.clone()),
+                photo,
+            };
+            validator.validate_matches(&mut result, &query).await;
+        }
+        Ok(result)
     }
 
     /// Build the search input: prefer the selected face crop (local, padded,

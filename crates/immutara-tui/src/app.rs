@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use immutara_core::PipelineEvent;
 use immutara_core::domain::attestation::{AttestationRecord, BlockchainVerification};
 use immutara_core::domain::evidence::{ContentHash, EvidenceId, EvidenceMetadata};
+use immutara_core::domain::search::SearchInputKind;
 use immutara_core::domain::verification::{VerificationCheck, VerificationResult};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
@@ -245,6 +246,9 @@ pub struct App {
     pub analysis: Option<AnalysisInfo>,
     /// Search summary.
     pub search: Option<SearchInfo>,
+    /// Human note describing a `SearchFallback` (FACE CROP -> FULL IMAGE),
+    /// preserved even after the fallback's `SearchCompleted` replaces `search`.
+    pub search_fallback: Option<String>,
     /// Verification summary.
     pub verification: Option<VerificationInfo>,
     /// Attestation summary.
@@ -270,6 +274,7 @@ impl Default for App {
             evidence: None,
             analysis: None,
             search: None,
+            search_fallback: None,
             verification: None,
             attestation: None,
             log: EventLog::new(),
@@ -397,6 +402,20 @@ impl App {
                     social_state: format!("{:?}", result.social_state),
                 });
                 self.stage(StageId::Search).complete();
+            }
+            PipelineEvent::SearchFallback {
+                attempted_input,
+                attempted_state,
+                reason,
+                ..
+            } => {
+                let input = match attempted_input {
+                    immutara_core::domain::search::SearchInputKind::FaceCrop => "FACE CROP",
+                    immutara_core::domain::search::SearchInputKind::FullImage => "FULL IMAGE",
+                };
+                self.search_fallback = Some(format!(
+                    "{input} ({attempted_state:?}) did not verify -> FULL IMAGE fallback: {reason}"
+                ));
             }
             PipelineEvent::SearchFailed {
                 provider_id, error, ..
@@ -549,6 +568,7 @@ fn event_evidence_id(event: &PipelineEvent) -> EvidenceId {
         | PipelineEvent::AnalysisFailed { evidence_id, .. }
         | PipelineEvent::SearchStarted { evidence_id, .. }
         | PipelineEvent::SearchCompleted { evidence_id, .. }
+        | PipelineEvent::SearchFallback { evidence_id, .. }
         | PipelineEvent::SearchFailed { evidence_id, .. }
         | PipelineEvent::VerificationStarted { evidence_id }
         | PipelineEvent::VerificationCompleted { evidence_id, .. }
@@ -599,6 +619,21 @@ fn describe(event: &PipelineEvent) -> (String, bool) {
             (format!("search started ({provider_id})"), false)
         }
         PipelineEvent::SearchCompleted { .. } => ("search completed".into(), false),
+        PipelineEvent::SearchFallback {
+            attempted_input,
+            attempted_state,
+            reason,
+            ..
+        } => {
+            let input = match attempted_input {
+                SearchInputKind::FaceCrop => "FACE CROP",
+                SearchInputKind::FullImage => "FULL IMAGE",
+            };
+            (
+                format!("search fallback: {input} ({attempted_state:?}) -> FULL IMAGE — {reason}"),
+                false,
+            )
+        }
         PipelineEvent::SearchFailed { error, .. } => (format!("search failed: {error}"), true),
         PipelineEvent::VerificationStarted { .. } => ("verification started".into(), false),
         PipelineEvent::VerificationCompleted { result, .. } => (

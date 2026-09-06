@@ -7,7 +7,7 @@
 use super::analysis::AnalysisResult;
 use super::attestation::{AttestationReceipt, AttestationRecord};
 use super::evidence::{ContentHash, EvidenceId, EvidenceMetadata};
-use super::search::SearchResult;
+use super::search::{SearchInputKind, SearchMatchState, SearchResult};
 use super::verification::VerificationResult;
 
 /// An event describing a transition in the pipeline lifecycle.
@@ -58,6 +58,15 @@ pub enum PipelineEvent {
         evidence_id: EvidenceId,
         provider_id: String,
         error: String,
+    },
+    /// The FACE CROP search was completed first but did not reach
+    /// `SOCIAL_MATCH_VERIFIED`; the pipeline fell back to a FULL IMAGE
+    /// search and is restarting the Search stage with the full image.
+    SearchFallback {
+        evidence_id: EvidenceId,
+        attempted_input: SearchInputKind,
+        attempted_state: SearchMatchState,
+        reason: String,
     },
 
     // ---- Verification stage ----

@@ -20,7 +20,9 @@ pub trait ImageSearchProvider: Send + Sync {
     /// The default implementation searches the full image. Providers that
     /// recognize a face crop (e.g. the SerpApi Google Lens provider) override
     /// this to submit the crop first and fall back to the full image when the
-    /// crop yields no useful result.
+    /// crop yields no useful result. The pipeline additionally retries the
+    /// full image when a media-validating provider's crop result did not reach
+    /// `SOCIAL_MATCH_VERIFIED`, regardless of candidate count.
     async fn search_with_input(
         &self,
         evidence: &Evidence,
