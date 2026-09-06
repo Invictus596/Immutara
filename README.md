@@ -415,8 +415,11 @@ Search input is a first-class enum on `SearchResult.search_input`:
 | `FACE CROP`         | Analysis found a selected face **and** a readable `source_path` produced a valid crop |
 | `FULL IMAGE`        | No usable face crop (no face, unreadable file, crop failure) |
 
-The crop is searched first; **fallback to the full image happens only when the
-crop search returns zero matches** (never on an error — errors propagate). The
+The crop is searched first; the pipeline falls back to the full image when the
+crop did not reach `SOCIAL_MATCH_VERIFIED` — either the crop search returned
+zero matches, or it returned candidates that failed independent media
+validation (emitting a `SearchFallback` event with the reason). A crop-search
+*error* never triggers a fallback (errors propagate — nothing was learned). The
 TUI shows `Search input: FACE CROP` / `FULL IMAGE` accordingly.
 
 ### Request flow
@@ -461,8 +464,8 @@ reproducible by recomputing from the events.
 ### Independent media-match validation
 
 Search providers return *candidate* pages for the searched face crop; Immutara
-then independently fetches the candidate's public media and compares it to the
-searched image with deterministic hashes:
+then independently fetches the candidate's **source page** public media and
+compares it to the searched image with deterministic hashes:
 
 1. **Exact hash** — the fetched media bytes are SHA-256-identical to the
    searched image (`method = exact_hash`, `distance = 0`).
@@ -470,15 +473,24 @@ searched image with deterministic hashes:
    resize) is compared by Hamming distance against a fixed threshold of 12
    (`method = perceptual_hash`, `distance`, `threshold`).
 
-Media sources are tried in order: the provider-returned image URL, the page's
-`og:image`, then the first absolute `<img src>` on the page. A source that
-*passes* immediately settles the match; a fetched-but-failing source is recorded
-as *unverified* evidence and the page's own media is still consulted, because
-the full-size upload (`og:image`) often matches where a tiny hosted crop does
-not. Validation never bypasses access controls — a login wall, 4xx, non-image
-content, or oversized media records honest *unverified* evidence instead. Every
-comparison records a `MediaMatchEvidence { method, distance, threshold, passed,
-media_url, note }` on the match, and the search stage exposes one overall state:
+**Attribution rule (strict):** a **social** candidate verifies only when media
+discovered *on its own source page* — the page's `og:image`, else the first
+absolute `<img src>` — is independently fetched and matches the searched image.
+This is what `SOCIAL_MATCH_VERIFIED` means: the matching media is attributable
+to the actual public social page. The search provider's *own* thumbnail URL
+(Google's `encrypted-tbnN.gstatic.com` cached thumbnail, etc.) is **supporting
+evidence only** — it is the provider's copy of the matched image and proves
+nothing about what the page serves today, so it is never decisive for a social
+candidate. Non-social candidates keep a cheaper provider-thumbnail fast path,
+falling back to page media when the thumbnail cannot establish a match.
+
+Validation never bypasses access controls — a login wall, 4xx/403, non-image
+content, or oversized media records honest *unverified* evidence instead, even
+when the provider's thumbnail matched. Every comparison records a
+`MediaMatchEvidence { method, distance, threshold, passed, media_url, note }`
+on the match, with the `note` separating "provider thumbnail matched (supporting
+evidence only)" from the *independent* page-media outcome for an operator. The
+search stage exposes one overall state:
 
 | State | Meaning |
 |---|---|
@@ -511,33 +523,52 @@ unless the search state is `SOCIAL_MATCH_VERIFIED`. The default remains
 
 ### Example live results
 
-Executed in this environment with a real key against two public-domain images.
+Executed in this environment with a real key against public-domain images.
 Results are runtime-discovered, not hardcoded; a representative strict run on a
 NASA public-domain photograph (no face → full-image search) looked like:
 
 ```text
-Search   : provider serpapi_lens | input FULL IMAGE | 59 matches (0 exact, 59 visual) | state SocialMatchVerified
-  selected (attested): [visual] #18 https://www.reddit.com/r/space/comments/rk0a0t/the_earth_seemingly_rising_above_the_lunar/ | domain reddit.com
-  social: https://www.instagram.com/p/DcZhPDWAIIK/
-  media    : VERIFIED perceptual_hash (distance 0/12) — perceptual match against searched image | url https://encrypted-tbn0.gstatic.com/images?q=tbn:…
-Verify   : policy v1 | checks 3: 3 passed | verdict PASS
-   [PASS] social_match_verified
+Search   : provider serpapi_lens | input FULL IMAGE | 60 matches (0 exact, 60 visual) | state SocialCandidateUnverified
+  selected (attested): [visual] #1 https://en.wikipedia.org/wiki/Spaceship_Earth | domain en.wikipedia.org
+  #2 https://science.nasa.gov/resource/apollo-8s-iconic-earthrise/ | domain science.nasa.gov  (…and more)
+  social: https://www.instagram.com/reel/DSp6csUCV6I/
+  media    : UNVERIFIED cannot attribute the matching media to this page (provider thumbnail did not match …); page media: HTTP 403 Forbidden | url https://scontent.cdninstagram.com/v/t51.… (Instagram CDN)
+Verify   : policy v1 | checks 3: 2 passed | verdict FAIL
+   [FAIL] social_match_verified
 Attest   : provider evm | VERIFIED (read-back matches)
 ```
 
+(Represents the strict validator exactly: Instagram/Facebook page media is not
+independently retrievable, so the social check honestly fails even though the
+web results are genuine; the strict `verdict FAIL` record is still attested.)
+
 The same pipeline exercises the **face-crop-first** path on public-domain
-portraits. A canonical-repost subject (Leonardo's *Mona Lisa*, PD) verifies
-end-to-end: Lens returns public Instagram reposts of the painting whose Google
-thumbnails are downscales of the identical frame, so the perceptual match
-passes at `distance ≤ 12` and the strict run reports `SOCIAL_MATCH_VERIFIED`,
-`verdict PASS`, and a matching on-chain read-back (see
-[Demo test assets and provenance](#demo-test-assets-and-provenance)). By contrast
-an official presidential portrait (face-crop search) found social candidates
-(Instagram and Facebook pages) but none had publicly retrievable media matching
-the crop; under the strict policy that check honestly reports
-`SOCIAL_CANDIDATE_UNVERIFIED` and `verdict FAIL`, and the failed record is still
-attested so the decision is not lost. That failure is the point: the system
-never claims a match it cannot independently confirm.
+portraits. Whether a repost verifies end-to-end depends entirely on whether the
+candidate's **own page media** is publicly fetchable and matches the searched
+frame at `distance ≤ 12`. In this environment, Instagram reposts almost always
+fail this under the strict validator because their CDN media returns **HTTP
+403** to anonymous fetch (see
+[Demo test assets and provenance](#demo-test-assets-and-provenance)) — those are
+honestly reported as `SOCIAL_CANDIDATE_UNVERIFIED` / `verdict FAIL`, and the
+failed record is still attested so the decision is not lost. That failure is the
+point: the system never claims a match it cannot independently confirm on the
+candidate's own page.
+
+A live end-to-end contrast (this repository's validation fixtures, Section
+[Demo test assets and provenance](#demo-test-assets-and-provenance)) shows the
+strict validator telling the two apart:
+
+- **Positive — Tesla portrait** (`test_images/tesla_portrait.jpg`): face crop →
+  runtime-discovered Pinterest pin → the pin's own `i.pinimg.com` media is freely
+  fetchable and matches at dHash **3/12** → `SOCIAL_MATCH_VERIFIED` → `verdict
+  PASS` → `EVM VERIFIED` (read-back matches).
+- **Negative — friend photo** (`test_images/test.jpg`): face crop → full-image
+  fallback → runtime-discovered Instagram post whose CDN media returns **HTTP
+  403**. The provider thumbnail matched (supporting evidence only) but the page
+  could not be independently confirmed → `SOCIAL_CANDIDATE_UNVERIFIED` →
+  `verdict FAIL` (`social_match_verified` fails) → still attested so nothing is
+  lost. The honest diagnostic reads: *"provider thumbnail matched (supporting
+  evidence only) … page media: HTTP 403 Forbidden."*
 
 ### Testing
 
@@ -561,12 +592,23 @@ the search immediately with a clear configuration error.
 ### Limitations
 
 - Real Google Lens search requires a SerpApi key (free tier is rate-limited);
-  it is a commercial API and results depend on their index.
+  it is a commercial API and results depend on their index. Lens result sets are
+  **nondeterministic across calls**; the face-crop-first + full-image fallback is
+  what makes verification reproducible-enough across runs.
 - Lens has no numeric relevance score; the plugin never invents one.
 - Social classification is host-based only — Immutara does not verify page
   ownership or reachability, and does not identify people.
 - The face crop searches the same public index as the full image; garbage in →
   garbage out remains true.
+- **Recall limitation:** Lens does not always surface every copy of an image. In
+  this environment it repeatedly failed to surface a known ground-truth
+  Instagram post for the friend-photo fixture — the tool honestly reports
+  `SOCIAL_CANDIDATE_UNVERIFIED` rather than guessing.
+- **Instagram retrieval limitation:** Instagram post pages expose no
+  `og:image`/absolute `<img>`, and their CDN media returns **HTTP 403** to
+  anonymous fetch. Immutara does not work around this (no auth/cookies/browser
+  automation/private APIs) — such candidates resolve to
+  `SOCIAL_CANDIDATE_UNVERIFIED`.
 
 ## Media discovery tool (dev only)
 
@@ -584,17 +626,44 @@ cargo run -p immutara-pipeline --bin discover -- ./test_images/obama.jpg
 
 ## Demo test assets and provenance
 
-The two checked-in demo images are public-domain U.S. government works, fetched
+The three checked-in demo images are public-domain U.S. government works, fetched
 from Wikimedia Commons via its API (license fields verified before download):
 
 | File | Source (Commons) | Provenance | Size / dims |
 |---|---|---|---|
-| `test_images/mona_lisa.jpg` | `Mona Lisa, by Leonardo da Vinci, from C2RMF retouched.jpg` | Leonardo da Vinci, c. 1503–1506 (Louvre); C2RMF-retouched scan, Commons license `Public domain`. 2048-px derivative rendered from the 94 MB master with cv2 `INTER_AREA`. Face fixture that demonstrably reaches `SOCIAL_MATCH_VERIFIED` (verified Instagram reposts). | 3 465 931 B, 2048×3052 |
+| `test_images/mona_lisa.jpg` | `Mona Lisa, by Leonardo da Vinci, from C2RMF retouched.jpg` | Leonardo da Vinci, c. 1503–1506 (Louvre); C2RMF-retouched scan, Commons license `Public domain`. 2048-px derivative rendered from the 94 MB master with cv2 `INTER_AREA`. Face fixture exercising the strict validator's handling of repost pages whose media is not independently retrievable (Instagram pages 403 → `SOCIAL_CANDIDATE_UNVERIFIED`). | 3 465 931 B, 2048×3052 |
 | `test_images/earthrise.jpg` | `NASA-Apollo8-Dec24-Earthrise.jpg` (`Commons: a/a8`) | NASA/Apollo 8, photo by astronaut Bill Anders; Commons license `Public domain` (PD-USGov-NASA). No face → exercises full-image search. | 311 263 B, 2400×2400 |
 | `test_images/obama.jpg` | `President_Barack_Obama.jpg` (`Commons: 8/8d`) | Official White House portrait (Canon EOS 5D Mark III, 2012-12-06), PD-USGov; Commons license `Public domain`. Multiple faces → exercises face-crop search. | 1 276 121 B, 2687×3356 |
 
 Download commands used (Commons `action=query&prop=imageinfo&iiprop=url|size|extmetadata`
 used to confirm the license short name before saving each file).
+
+### Evaluation fixture hashes and provenance (not committed)
+
+The following local evaluation fixtures exercise the strict validator live
+(positive and negative controls). They are **not committed** to the repository
+(inline, and confirmed by the objective to keep out of git); the public-domain
+source is cited and each file's SHA-256 is recorded so the attested content hash
+from any run can be cross-checked:
+
+| File | Source | Provenance | SHA-256 (content hash attested) |
+|---|---|---|---|
+| `test_images/tesla_portrait.jpg` | `Tesla_circa_1890.jpeg` (Wikimedia Commons) | Nikola Tesla portrait, c. 1890 — **public domain** (pre-1928 publication). Single high-confidence face (YuNet conf ~0.912). Live strict run: face crop → runtime-discovered Pinterest pin → pin's own `i.pinimg.com` media matches at dHash **3/12** → `SOCIAL_MATCH_VERIFIED` → `EVM VERIFIED`. | `c26252cc5d907d2404b68d04480e5eb2fa0f2dadc085e9e2a5a09dabbaf3a89b` |
+| `test_images/test.jpg` | personal test photograph (the "friend photo") | The negative-control fixture. Its Instagram provenance is **not** asserted by the tool — it is an *offline* evaluation reference only, never injected into search. Live strict run: face crop → full-image fallback → runtime-discovered Instagram post whose CDN media returns **HTTP 403** → `SOCIAL_CANDIDATE_UNVERIFIED` → `verdict FAIL` (honest rejection; still attested). | `12b9d77d8a5f6b2da3b030b9b82ce97a907e587621bd1f68b9fc5f04d52d1370` |
+| `test_images/tesla.jpg` | `Tesla_circa_1890.jpeg` (Wikimedia Commons) | A fragile/weak duplicate of the same Tesla portrait (lower-confidence crop); retained as a secondary evaluation positive, not a canonical fixture. | `55235649d7162b97b5eb8f6318f776ba46bc43f8cc93179e8c8c9b7ed541643b` |
+
+**Instagram retrieval limitation (recorded, not worked around):** Google
+Lens/SerpApi has not surfaced the friend's ground-truth post across repeated
+runs (a Lens recall limitation), and Instagram post pages return **no
+`og:image`, `display_url`, or absolute `<img>`** — only base64 placeholders and
+login prompts (an Instagram retrieval limitation). Even when Lens surfaces an
+Instagram post, its CDN media (`scontent.cdninstagram.com`/`i.instagram.com`)
+consistently returns **HTTP 403** to Immutara's anonymous fetch, so such
+candidates correctly resolve to `SOCIAL_CANDIDATE_UNVERIFIED`. Immutara does
+not bypass these access controls (no auth, cookies, browser automation, or
+private APIs) — an unreachable page is honestly reported as unverified. As with
+all discovered URLs, recent runtime-discovered Instagram post IDs are **not**
+hardcoded into production logic.
 
 ## Real EVM attestation
 

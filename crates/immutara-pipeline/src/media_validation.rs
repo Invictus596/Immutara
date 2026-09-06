@@ -8,6 +8,12 @@
 //! - otherwise a 64-bit perceptual hash (dHash on a grayscale 9x8 Triangle
 //!   resize) is compared by Hamming distance against a fixed threshold.
 //!
+//! Attribution rule: a **social** candidate verifies only when media
+//! discovered *on the source page itself* (`og:image`, then the first absolute
+//! `<img>`) matches the query. The provider's own thumbnail URL is supporting
+//! evidence only — it is the search provider's copy of the matched image and
+//! proves nothing about what the page serves today.
+//!
 //! The validator never reuses the facial-recognition model, never claims
 //! identity, and never bypasses access controls: login-walled, CAPTCHA'd,
 //! private, or otherwise unreachable media simply records honest evidence of
@@ -128,66 +134,120 @@ impl MediaMatchValidator {
 
     /// Fetch and compare a single candidate's public media.
     ///
-    /// Sources are tried in order (provider image URL, then `og:image`, then
-    /// the first absolute `<img>` on the page). Validation uses the first
-    /// source that *passes*; a fetched-but-failing media is evidence for
-    /// `UNVERIFIED`, and the page is still consulted (its `og:image` is often
-    /// the full-size upload where the thumbnail is a small crop).
+    /// For **non-social** candidates the provider thumbnail is attempted first
+    /// (cheap, on-point) and the page is only fetched when it cannot establish
+    /// a match. For **social** candidates the source page is always consulted:
+    /// a provider thumbnail is supporting evidence only — it is the search
+    /// provider's copy of the matched image, so by itself it proves nothing
+    /// about what the page serves today. A social candidate verifies only when
+    /// media discovered *on the page* (`og:image`, falling back to the first
+    /// absolute `<img>`) matches the query.
     async fn validate_one(&self, m: &mut SearchMatch, query: &ValidationQuery) {
-        // (A) Provider-returned image URL is the cheapest, most on-point media.
-        if let Some(url) = m
+        let is_social = m.source_url.as_deref().is_some_and(is_social_media_url);
+
+        // (A) Provider-returned thumbnail — supporting signal for socials.
+        let thumbnail = match m
             .thumbnail_url
             .as_deref()
             .filter(|u| is_absolute_http_url(u))
-            && let Ok(bytes) = self.fetch_image_bytes(url).await
         {
-            let evidence = self.compare(url.to_string(), &bytes, query);
-            if evidence.passed {
-                m.media_match = Some(evidence);
-                return;
-            }
-            m.media_match = Some(evidence);
-        }
-        // (B/C) Continue with the candidate page's own discoverable media.
-        let page = m.source_url.as_deref().filter(|u| is_absolute_http_url(u));
-        if page.is_none() {
-            if m.media_match.is_none() {
-                m.media_match =
-                    Some(self.failed("candidate has no source URL to inspect".to_string(), None));
-            }
+            Some(url) => match self.fetch_image_bytes(url).await {
+                Ok(bytes) => {
+                    let evidence = self.compare(url.to_string(), &bytes, query);
+                    if !is_social && evidence.passed {
+                        m.media_match = Some(evidence);
+                        return;
+                    }
+                    Some(evidence)
+                }
+                Err(_) => None,
+            },
+            None => None,
+        };
+
+        // (B/C) The page's own discoverable media — the independent evidence.
+        let page_evidence = self.page_media(m, query).await;
+
+        if is_social {
+            m.media_match = Some(match page_evidence {
+                Some(ev) if ev.passed => ev,
+                other => self.social_failure(thumbnail.as_ref(), other.as_ref()),
+            });
             return;
         }
-        let html = match self.fetch_page(page.expect("checked above")).await {
+
+        // Non-social: prefer page-discovered media, otherwise the thumbnail
+        // evidence (which did not pass), otherwise an honest no-source note.
+        m.media_match = Some(page_evidence.or(thumbnail).unwrap_or_else(|| {
+            self.failed("candidate has no source URL to inspect".to_string(), None)
+        }));
+    }
+
+    /// Retrieve a candidate's own media from its source page and compare it.
+    ///
+    /// Returns `None` only when the candidate has no usable absolute source
+    /// URL. Every other outcome — page fetch failure, no discoverable image,
+    /// media fetch failure, or a compared (passing/failing) match — is a
+    /// concrete `MediaMatchEvidence`.
+    async fn page_media(
+        &self,
+        m: &SearchMatch,
+        query: &ValidationQuery,
+    ) -> Option<MediaMatchEvidence> {
+        let page = m
+            .source_url
+            .as_deref()
+            .filter(|u| is_absolute_http_url(u))?;
+        let html = match self.fetch_page(page).await {
             Ok(html) => html,
-            Err(note) => {
-                if m.media_match.is_none() {
-                    m.media_match = Some(self.failed(note, None));
-                }
-                return;
-            }
+            Err(note) => return Some(self.failed(note, None)),
         };
         let (og, first_img) = extract_image_urls(&html);
-        let discovered = og.or(first_img);
-        match discovered {
-            Some(url) => match self.fetch_image_bytes(&url).await {
-                Ok(bytes) => {
-                    m.media_match = Some(self.compare(url, &bytes, query));
-                }
-                Err(note) => {
-                    if m.media_match.is_none() {
-                        m.media_match = Some(self.failed(note.clone(), Some(url)));
-                    }
-                }
-            },
+        let url = match og.or(first_img) {
+            Some(url) => url,
             None => {
-                if m.media_match.is_none() {
-                    m.media_match = Some(self.failed(
-                        "page has no discoverable og:image or absolute <img> src".to_string(),
-                        m.source_url.clone(),
-                    ));
-                }
+                return Some(self.failed(
+                    "page has no discoverable og:image or absolute <img> src".to_string(),
+                    Some(page.to_string()),
+                ));
             }
+        };
+        match self.fetch_image_bytes(&url).await {
+            Ok(bytes) => Some(self.compare(url, &bytes, query)),
+            Err(note) => Some(self.failed(note, Some(url))),
         }
+    }
+
+    /// Failure evidence for a social candidate, explicitly separating the
+    /// (supporting) provider-thumbnail outcome from the independent page
+    /// outcome, so an operator can see that the thumbnail matched even though
+    /// the page itself did not.
+    fn social_failure(
+        &self,
+        thumbnail: Option<&MediaMatchEvidence>,
+        page: Option<&MediaMatchEvidence>,
+    ) -> MediaMatchEvidence {
+        let thumb = match thumbnail {
+            Some(t) if t.passed => {
+                "provider thumbnail matched (supporting evidence only)".to_string()
+            }
+            Some(t) => format!(
+                "provider thumbnail did not match ({})",
+                t.note.as_deref().unwrap_or("failed")
+            ),
+            None => "no provider thumbnail".to_string(),
+        };
+        let (page_note, page_url) = match page {
+            Some(p) => (
+                format!("page media: {}", p.note.as_deref().unwrap_or("unavailable")),
+                p.media_url.clone(),
+            ),
+            None => ("no source URL to inspect".to_string(), None),
+        };
+        self.failed(
+            format!("cannot attribute the matching media to this page ({thumb}); {page_note}"),
+            page_url,
+        )
     }
 
     /// Compare fetched media against the searched image, deterministically.
@@ -465,6 +525,8 @@ mod tests {
     use immutara_core::domain::evidence::EvidenceId;
     use immutara_core::domain::search::SearchInputKind;
     use immutara_core::domain::search::{SearchMatch, SearchMatchKind};
+    use std::net::TcpListener;
+    use std::net::TcpStream;
 
     fn sample_result(matches: Vec<SearchMatch>) -> SearchResult {
         SearchResult {
@@ -624,5 +686,252 @@ mod tests {
         ]);
         let v = MediaMatchValidator::default_client();
         assert_eq!(v.validation_order(&result), vec![1, 2, 0]);
+    }
+
+    /// Two 64x64 patterns with strongly opposed dHash values: `0` is dark
+    /// left / light right, `1` is the inverse. Far enough apart that a
+    /// perceptual mismatch is unambiguous.
+    fn pattern_bytes(pattern: usize) -> Vec<u8> {
+        let mut img = image::RgbImage::new(64, 64);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            let (r, g, b) = match pattern {
+                0 => {
+                    if x < 32 {
+                        (8, 8, 8)
+                    } else {
+                        (247, 247, 247)
+                    }
+                }
+                _ => {
+                    if x < 32 {
+                        (247, 247, 247)
+                    } else {
+                        (8, 8, 8)
+                    }
+                }
+            };
+            *px = image::Rgb([r, g, b]);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn far_part_dhash(a: &[u8], b: &[u8]) -> u32 {
+        let ha = MediaMatchValidator::dhash(a).expect("decodes");
+        let hb = MediaMatchValidator::dhash(b).expect("decodes");
+        MediaMatchValidator::hamming(ha, hb)
+    }
+
+    #[test]
+    fn regression_thumbnail_matches_but_page_media_differs_is_unverified() {
+        let v = MediaMatchValidator::default_client();
+        // The query is image B; the page now serves a different image C.
+        let b = pattern_bytes(0);
+        let c = pattern_bytes(1);
+        assert!(
+            far_part_dhash(&b, &c) > 12,
+            "patterns must be visually far apart"
+        );
+        let query = ValidationQuery::new(b.clone(), b.clone());
+
+        // Google-provided thumbnail of the matched result: matches B exactly.
+        let thumbnail = v.compare("https://encrypted-tbn1.gstatic.com/tbn".into(), &b, &query);
+        assert!(
+            thumbnail.passed,
+            "the false-positive precondition: thumbnail matches"
+        );
+
+        // Independently fetched page media: B is NOT on the page; C is.
+        let page = v.compare("https://scontent.example/actual.png".into(), &c, &query);
+        assert!(!page.passed, "page media must not match the query");
+
+        let evidence = v.social_failure(Some(&thumbnail), Some(&page));
+        assert!(!evidence.passed, "must NOT verify from the thumbnail alone");
+        let note = evidence.note.as_deref().unwrap_or("");
+        assert!(
+            note.contains("supporting evidence only"),
+            "thumbnail matched but is supporting: {note}"
+        );
+        assert!(
+            note.contains("page media"),
+            "page outcome must be recorded: {note}"
+        );
+
+        let mut m = match_at("https://www.instagram.com/p/AAAA");
+        m.media_match = Some(evidence);
+        assert_eq!(
+            derive_state(&sample_result(vec![m])),
+            SearchMatchState::SocialCandidateUnverified
+        );
+    }
+
+    #[test]
+    fn social_page_with_matching_page_media_is_verified() {
+        let v = MediaMatchValidator::default_client();
+        let b = pattern_bytes(0);
+        let query = ValidationQuery::new(b.clone(), b.clone());
+
+        // The page's og:image is exactly the searched media.
+        let page = v.compare("https://scontent.example/upload.png".into(), &b, &query);
+        assert!(page.passed);
+
+        let mut m = match_at("https://www.instagram.com/p/BBBB");
+        m.media_match = Some(page);
+        assert_eq!(
+            derive_state(&sample_result(vec![m])),
+            SearchMatchState::SocialMatchVerified
+        );
+    }
+
+    #[test]
+    fn social_candidate_with_inaccessible_page_is_unverified_even_with_matching_thumbnail() {
+        let v = MediaMatchValidator::default_client();
+        let b = pattern_bytes(0);
+        let query = ValidationQuery::new(b.clone(), b.clone());
+
+        let thumbnail = v.compare("https://encrypted-tbn1.gstatic.com/tbn".into(), &b, &query);
+        assert!(thumbnail.passed);
+        // Instagram refuses the page (login wall/bot protection): the media of
+        // the page cannot be independently tied to the source, so the honest
+        // outcome is UNVERIFIED — never a bypass.
+        let evidence = v.social_failure(Some(&thumbnail), None);
+        assert!(!evidence.passed);
+        assert!(
+            evidence
+                .note
+                .as_deref()
+                .unwrap_or("")
+                .contains("no source URL to inspect")
+        );
+
+        let mut m = match_at("https://www.instagram.com/p/CCCC");
+        m.media_match = Some(evidence);
+        assert_eq!(
+            derive_state(&sample_result(vec![m])),
+            SearchMatchState::SocialCandidateUnverified
+        );
+    }
+
+    /// Minimal static HTTP server for exercising `validate_one` over real
+    /// reqwest calls without leaving the machine.
+    struct StaticServer {
+        port: u16,
+        _handle: std::thread::JoinHandle<()>,
+    }
+
+    impl StaticServer {
+        fn serve(routes: Vec<(&'static str, &'static str, Vec<u8>)>) -> Self {
+            Self::serve_on(0, routes)
+        }
+
+        fn serve_on(port: u16, routes: Vec<(&'static str, &'static str, Vec<u8>)>) -> Self {
+            let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind loopback");
+            let port = listener.local_addr().expect("port").port();
+            let handle = std::thread::spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(mut stream) = conn else {
+                        continue;
+                    };
+                    let path = read_request_path(&mut stream);
+                    let Some((ctype, body)) = routes
+                        .iter()
+                        .find(|(p, _, _)| Some(*p) == path.as_deref())
+                        .map(|(_, c, b)| (*c, b.clone()))
+                    else {
+                        let _ = write_response(&mut stream, "text/plain", b"404");
+                        continue;
+                    };
+                    let _ = write_response(&mut stream, ctype, &body);
+                }
+            });
+            Self {
+                port,
+                _handle: handle,
+            }
+        }
+    }
+
+    fn read_request_path(stream: &mut TcpStream) -> Option<String> {
+        use std::io::Read;
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).ok()?;
+        let head = String::from_utf8_lossy(&buf[..n]);
+        let line = head.lines().next()?;
+        let path = line.split_whitespace().nth(1)?;
+        Some(path.to_string())
+    }
+
+    fn write_response(stream: &mut TcpStream, ctype: &str, body: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )?;
+        stream.write_all(body)?;
+        stream.flush()
+    }
+
+    #[tokio::test]
+    async fn validate_one_uses_provider_thumbnail_for_non_social_fast_path() {
+        let b = pattern_bytes(0);
+        let c = pattern_bytes(1);
+        let server = StaticServer::serve(vec![
+            ("/thumb.png", "image/png", b.clone()),
+            ("/page.html", "text/html", Vec::new()),
+            ("/media.png", "image/png", c),
+        ]);
+        let v = MediaMatchValidator::default_client();
+        let mut m = match_at(&format!("http://127.0.0.1:{}/page.html", server.port));
+        m.thumbnail_url = Some(format!("http://127.0.0.1:{}/thumb.png", server.port));
+        let query = ValidationQuery::new(b.clone(), b.clone());
+
+        v.validate_one(&mut m, &query).await;
+
+        let ev = m.media_match.as_ref().expect("evidence recorded");
+        assert!(ev.passed);
+        assert_eq!(ev.method, Some(MediaMatchMethod::ExactHash));
+        assert_eq!(
+            ev.media_url.as_deref(),
+            Some(format!("http://127.0.0.1:{}/thumb.png", server.port).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_one_falls_back_to_page_media_when_thumbnail_is_absent() {
+        let b = pattern_bytes(0);
+        // Reserve a stable loopback port so the page HTML can name the real
+        // media URL before the server thread binds it.
+        let guest = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = guest.local_addr().unwrap().port();
+        drop(guest);
+
+        let server = StaticServer::serve_on(
+            port,
+            vec![
+                ("/page.html", "text/html", {
+                    format!(
+                        "<meta property=\"og:image\" content=\"http://127.0.0.1:{port}/media.png\">"
+                    )
+                    .into_bytes()
+                }),
+                ("/media.png", "image/png", b.clone()),
+            ],
+        );
+        let v = MediaMatchValidator::default_client();
+        let mut m = match_at(&format!("http://127.0.0.1:{}/page.html", server.port));
+        let query = ValidationQuery::new(b.clone(), b.clone());
+
+        v.validate_one(&mut m, &query).await;
+
+        let ev = m.media_match.as_ref().expect("evidence recorded");
+        assert!(ev.passed, "page media matches: {:?}", ev.note);
+        assert_eq!(
+            ev.media_url.as_deref(),
+            Some(format!("http://127.0.0.1:{}/media.png", server.port).as_str())
+        );
     }
 }
